@@ -1,9 +1,9 @@
-import { useState, useMemo } from "react";
-import { useQuery } from "convex/react";
+import { useEffect, useRef, useState, useMemo } from "react";
+import { useQuery, useMutation } from "convex/react";
 import { api } from "../../convex/_generated/api";
-import { getAuthUserId } from "@convex-dev/auth/server";
-import { query } from "../../convex/_generated/server";
 // import{vendor} from "../../convex/vendor";
+import { FormViewer } from "./FormViewer";
+import { toast } from "sonner";
 
 //vendor_1@intercont.com
 //Vendor@11
@@ -28,37 +28,16 @@ type AssignedForm = {
 };
 
 
-export const list = query({
-args: {},
-handler: async (ctx) => {
-const me = await getAuthUserId(ctx);
-if (!me) throw new Error("Not authenticated");
-// Active vendor roles
-const vendorRoles = await ctx.db
-  .query("userRoles")
-  .withIndex("by_role", q => q.eq("role", "vendor"))
-  .filter(q => q.eq(q.field("isActive"), true))
-  .collect();
-
-// Join roles -> users
-const vendors: { userId: string; name?: string; email?: string }[] = [];
-for (const r of vendorRoles) {
-  const u = await ctx.db.get(r.userId);
-  if (u) vendors.push({ userId: u._id, name: (u as any).name, email: (u as any).email });
-}
-vendors.sort((a, b) => (a.name || a.email || "").localeCompare(b.name || b.email || ""));
-return vendors;
-},
-});
-
-
-
 export function VendorDashboard({ user }: VendorDashboardProps) {
   const [activeTab, setActiveTab] = useState<"overview" | "assigned">("overview");
   const [refIdToOpen, setRefIdToOpen] = useState("");
+  const [selectedFormId, setSelectedFormId] = useState<string | null>(null);
 
   // Pull only forms that have vehicles assigned to this vendor
   const assignedForms = (useQuery(api.vendor.listAssignedForms, {}) || []) as unknown as AssignedForm[];
+  const notifications = useQuery(api.notifications.getNotifications, { limit: 10 }) || [];
+  const markAsRead = useMutation(api.notifications.markAsRead);
+  const seenNotifIds = useRef<Set<string>>(new Set());
 
   // Derived metrics for Overview
   const { totalAssignedVehicles, totalSubmittedVehicles } = useMemo(() => {
@@ -76,9 +55,36 @@ export function VendorDashboard({ user }: VendorDashboardProps) {
   const handleOpenByRefId = () => {
     const ref = refIdToOpen.trim();
     if (!ref) return;
-    // If you use Next.js routing, you can replace with router.push(`/vendor/forms/${encodeURIComponent(ref)}`);
-    window.location.href = `/vendor/forms/${encodeURIComponent(ref)}`;
+    const match = assignedForms.find((f) => f.refId === ref);
+    if (match) {
+      const id = typeof match.formId === "string" ? match.formId : (match.formId as any)?.id;
+      if (id) setSelectedFormId(id);
+    }
   };
+
+  // Popup new assignment notifications
+  useEffect(() => {
+    for (const n of notifications as any[]) {
+      if (n.type === "form_assigned" && !n.isRead && !seenNotifIds.current.has(n._id)) {
+        seenNotifIds.current.add(n._id);
+        toast.info(n.title || "New assignment", {
+          description: n.message,
+          action: {
+            label: "Open",
+            onClick: () => {
+              const formId = (n.data && (n.data.formId?.id || n.data.formId)) || undefined;
+              if (formId) setSelectedFormId(formId);
+              markAsRead({ notificationId: n._id });
+            },
+          },
+        });
+      }
+    }
+  }, [notifications]);
+
+  if (selectedFormId) {
+    return <FormViewer formId={selectedFormId} onBack={() => setSelectedFormId(null)} user={user} />;
+  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -193,13 +199,16 @@ export function VendorDashboard({ user }: VendorDashboardProps) {
                           <div className="text-xs text-gray-500 mt-1">{percent}% complete</div>
                         </div>
                       </div>
-                      <a
-                        href={`/vendor/forms/${encodeURIComponent(f.refId)}`}
+                      <button
+                        onClick={() => {
+                          const id = typeof f.formId === "string" ? (f.formId as string) : (f.formId as any)?.id;
+                          if (id) setSelectedFormId(id);
+                        }}
                         className="px-3 py-2 border rounded hover:bg-gray-50 text-center"
                       >
                         Open
-                      </a>
-                    </div>
+                      </button>
+                      </div>
                   );
                 })}
               </div>

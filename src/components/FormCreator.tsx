@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { toast } from "sonner";
@@ -37,6 +37,14 @@ type Allocation = {
   count: number;
 };
 
+// NEW: This type is now correctly placed outside the component.
+type DocItem = {
+  id: string;
+  file: File;
+  url: string; // object URL for preview
+  kind: "do" | "other";
+};
+
 const emptyVehicleDraft = {
   transporterName: "",
   ContactPerson: "",
@@ -55,6 +63,9 @@ const emptyVehicleDraft = {
 
 const genId = () => Math.random().toString(36).slice(2, 10);
 
+const ACCEPTED_DOC_TYPES = "image/*";
+const isImageFile = (file: File) => file.type?.startsWith("image/");
+
 export function FormCreator({ onFormCreated }: FormCreatorProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -65,6 +76,9 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
 
   const vendors = useQuery(api.users.getVendors, {}); // returns array or undefined while loading
   const createForm = useMutation(api.forms.createForm);
+  const createTransportVehiclesForForm = useMutation((api as any).forms.createTransportVehiclesForForm);
+  const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
+  const uploadPhoto = useMutation(api.photos.uploadPhoto);
 
   // Vehicles added across all transporters
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
@@ -78,7 +92,6 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
   const [vehicleDraft, setVehicleDraft] = useState<typeof emptyVehicleDraft>(emptyVehicleDraft);
   const [addCount, setAddCount] = useState<number>(1);
   const [errors, setErrors] = useState<Record<string, string>>({});
-
   // Booking details
   const [bookingDetails, setBookingDetails] = useState({
     bookingNo: "",
@@ -101,6 +114,136 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
     cleranceLocation: "",
     // cleranceContact:"",
   });
+
+
+
+  const [isDocSectionOpen, setIsDocSectionOpen] = useState(false);
+  const [doDoc, setDoDoc] = useState<DocItem | null>(null);
+  const [supportingDocs, setSupportingDocs] = useState<DocItem[]>([]);
+
+  // Document handling functions are now correctly placed here
+  const handleDoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!isImageFile(file)) {
+      toast.error("Please select an image file (JPEG/PNG/WebP)");
+      e.target.value = "";
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error("Image must be 10MB or smaller");
+      e.target.value = "";
+      return;
+    }
+    if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
+    const url = URL.createObjectURL(file);
+    setDoDoc({ id: genId(), file, url, kind: "do" });
+    e.target.value = "";
+  };
+
+  const handleSupportingUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const validImages = files.filter((file) => {
+      if (!isImageFile(file)) {
+        toast.error(`Unsupported file type for ${file.name}. Please select an image.`);
+        return false;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        toast.error(`Image ${file.name} exceeds 10MB limit.`);
+        return false;
+      }
+      return true;
+    });
+    const items = validImages.map((file) => ({
+      id: genId(),
+      file,
+      url: URL.createObjectURL(file),
+      kind: "other" as const,
+    }));
+    setSupportingDocs((prev) => [...prev, ...items]);
+    e.target.value = "";
+  };
+
+  // Helper: generate SHA-256 hash for duplicate detection
+  const generateFileHash = async (file: File): Promise<string> => {
+    const buffer = await file.arrayBuffer();
+    const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+  };
+
+  // Helper: upload a single image to Convex and attach to form
+  const uploadSingleImage = async (file: File, formId: string) => {
+    // Redundant guards; selection already validated
+    if (!isImageFile(file)) throw new Error("Only image files are allowed");
+    if (file.size > 10 * 1024 * 1024) throw new Error("Image exceeds 10MB");
+
+    const uploadUrl = await generateUploadUrl();
+    const res = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": file.type },
+      body: file,
+    });
+    if (!res.ok) throw new Error("Failed to upload to storage");
+    const { storageId } = await res.json();
+
+    const fileHash = await generateFileHash(file);
+    await uploadPhoto({
+      formId: formId as any,
+      storageId,
+      category: "documents" as any,
+      fileHash,
+      originalFilename: file.name,
+      fileSize: file.size,
+      mimeType: file.type,
+    });
+  };
+
+  // Helper: upload currently selected DO and supporting images after form creation
+  const uploadSelectedDocs = async (formId: string) => {
+    // DO (optional here; UI indicates mandatory but we don't block form creation)
+    if (doDoc?.file) {
+      try {
+        await uploadSingleImage(doDoc.file, formId);
+      } catch (err) {
+        toast.error(`Failed to upload DO: ${(err as Error).message}`);
+      }
+    }
+
+    // Supporting docs
+    for (const d of supportingDocs) {
+      try {
+        await uploadSingleImage(d.file, formId);
+      } catch (err) {
+        toast.error(`Failed to upload ${d.file.name}: ${(err as Error).message}`);
+      }
+    }
+  };
+
+  const removeDocItem = (kind: "do" | "other", id?: string) => {
+    if (kind === "do") {
+      if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
+      setDoDoc(null);
+    } else {
+      setSupportingDocs((prev) => {
+        const toRemove = prev.find((d) => d.id === id);
+        if (toRemove?.url) URL.revokeObjectURL(toRemove.url);
+        return prev.filter((d) => d.id !== id);
+      });
+    }
+  };
+
+  // useEffect hook is now correctly placed here
+  useEffect(() => {
+    return () => {
+      if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
+      supportingDocs.forEach((d) => d.url && URL.revokeObjectURL(d.url));
+    };
+    // The effect depends on these state variables to clean up properly.
+  }, [doDoc, supportingDocs]);
+
+  // --- END: ALL STATE AND LOGIC MOVED INSIDE THE COMPONENT ---
 
   // Derived totals
   const totalVehicles = Number.parseInt(bookingDetails.vehicalQty || "0", 10) || 0;
@@ -335,7 +478,43 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
         }),
       } as any);
 
+      // Create vendor assignments (transportVehicles) for this form so vendors can fill Transport Details
+      try {
+        const vehiclesPayload = vehicles.map((v) => {
+          const parentAllocation = allocations.find((a) => a.id === v.allocationId);
+          return {
+            allocationId: v.allocationId,
+            assignedTransporterId: parentAllocation?.vendorUserId as any,
+            transporterName: v.transporterName,
+            contactPerson: v.ContactPerson,
+            contactMobile: v.ContactPersonMobile,
+            vehicleNumber: v.vehicleNumber || undefined,
+            driverName: v.driverName || undefined,
+            driverMobile: v.driverMobile || undefined,
+            estimatedDeparture: v.estimatedDeparture ? new Date(v.estimatedDeparture).getTime() : undefined,
+            estimatedArrival: v.estimatedArrival ? new Date(v.estimatedArrival).getTime() : undefined,
+          };
+        });
+        if (vehiclesPayload.length > 0) {
+          await createTransportVehiclesForForm({
+            formId: result.formId as any,
+            vehicles: vehiclesPayload as any,
+          });
+        }
+      } catch (err) {
+        toast.error("Failed to create vendor assignments: " + (err as Error).message);
+      }
+
+      // Upload queued document images to this newly created form
+      await uploadSelectedDocs(result.formId);
+
       toast.success(`Form ${result.refId} created successfully!`);
+      // Clear document selections after successful upload
+      if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
+      supportingDocs.forEach((d) => d.url && URL.revokeObjectURL(d.url));
+      setDoDoc(null);
+      setSupportingDocs([]);
+
       onFormCreated(result.formId);
     } catch (error) {
       toast.error("Failed to create form: " + (error as Error).message);
@@ -595,6 +774,130 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                 />
               </div>
 
+
+
+              <div className="md:col-span-2 lg:col-span-3">
+                <button
+                  type="button"
+                  onClick={() => setIsDocSectionOpen((s) => !s)}
+                  className="px-3 py-2 rounded-md bg-indigo-600 text-white text-sm hover:bg-indigo-700"
+                >
+                  {isDocSectionOpen ? "Hide Documents" : "Add Documents"}
+                </button>
+              </div>
+
+              {isDocSectionOpen && (
+                <div className="md:col-span-2 lg:col-span-3 border rounded-lg p-4 bg-gray-50 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-gray-800">Upload Documents</h4>
+                    <span className="text-xs text-gray-500">
+                      DO is mandatory; others are optional.
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-gray-700">
+                      Delivery Order (DO) <span className="text-red-500">*</span>
+                    </label>
+                    {!doDoc ? (
+                      <input
+                        type="file"
+                        accept={ACCEPTED_DOC_TYPES}
+                        onChange={handleDoUpload}
+                        className="w-full border border-gray-300 rounded-md px-3 py-2"
+                      />
+                    ) : (
+                      <div className="border rounded-md p-3 bg-white flex items-start justify-between gap-3">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-800 truncate">{doDoc.file.name}</p>
+                          <p className="text-xs text-gray-500">
+                            {(doDoc.file.size / 1024).toFixed(1)} KB • {doDoc.file.type || "Unknown type"}
+                          </p>
+                          {isImageFile(doDoc.file) && (
+                            <img
+                              src={doDoc.url}
+                              alt="DO preview"
+                              className="mt-2 h-20 w-auto rounded border"
+                            />
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <a
+                            href={doDoc.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-blue-600 hover:underline text-sm"
+                          >
+                            Preview
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => removeDocItem("do")}
+                            className="text-red-600 hover:text-red-700 text-sm"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-gray-700">
+                      Other Supporting Documents (Optional)
+                    </label>
+                    <input
+                      type="file"
+                      multiple
+                      accept={ACCEPTED_DOC_TYPES}
+                      onChange={handleSupportingUpload}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2"
+                    />
+                    {supportingDocs.length > 0 && (
+                      <div className="mt-2 space-y-2">
+                        {supportingDocs.map((d) => (
+                          <div
+                            key={d.id}
+                            className="border rounded-md p-3 bg-white flex items-start justify-between gap-3"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-gray-800 truncate">{d.file.name}</p>
+                              <p className="text-xs text-gray-500">
+                                {(d.file.size / 1024).toFixed(1)} KB • {d.file.type || "Unknown type"}
+                              </p>
+                              {isImageFile(d.file) && (
+                                <img
+                                  src={d.url}
+                                  alt="Preview"
+                                  className="mt-2 h-16 w-auto rounded border"
+                                />
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              <a
+                                href={d.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-blue-600 hover:underline text-sm"
+                              >
+                                Preview
+                              </a>
+                              <button
+                                type="button"
+                                onClick={() => removeDocItem("other", d.id)}
+                                className="text-red-600 hover:text-red-700 text-sm"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+
+
               <div className="md:col-span-2 lg:col-span-3">
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Remarks
@@ -643,7 +946,7 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                     return (
                       <div key={a.id} className="border rounded-md p-3">
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-3">
-                          {/* <div className="lg:col-span-2">
+                          {<div className="lg:col-span-2">
                             <label
                               htmlFor={`transporter-${a.id}`}
                               className="block text-xs font-medium text-gray-700 mb-1"
@@ -667,36 +970,7 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                                 </option>
                               ))}
                             </select>
-                          </div> */}
-
-
-                         <div className="lg:col-span-2">
-          <label
-            htmlFor={`transporter-${a.id}`}
-            className="block text-xs font-medium text-gray-700 mb-1"
-          >
-            Transporter Name
-          </label>
-          <select
-            id={`transporter-${a.id}`}
-            value={a.vendorUserId}
-            onChange={(e) =>
-              updateAllocation(a.id, { vendorUserId: e.target.value })
-            }
-            className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="" disabled>
-              -- Select a Vendor --
-            </option>
-            {/* The `vendors` variable is now populated by your `useQuery` hook.
-                The `|| []` handles the initial loading state where `vendors` is undefined. */}
-            {(vendors || []).map((vendor) => (
-              <option key={vendor._id} value={vendor._id}>
-                {vendor.name}
-              </option>
-            ))}
-          </select>
-        </div>
+                          </div>}
 
                           <div>
                             <label className="block text-xs font-medium text-gray-700 mb-1">
@@ -748,30 +1022,30 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                           <div className="flex items-end gap-2">
                             <button
                               type="button"
-                              onClick={() =>
+                              onClick={() => {
+                                const ok = window.confirm('Are you sure? Once allocated, this action cannot be changed.');
+                                if (!ok) return;
                                 handleOpenAddVehiclesForAllocation({
                                   ...a,
                                   transporterName,
-                                })
-                              }
+                                });
+                              }}
                               disabled={remainingHere <= 0 || !a.vendorUserId}
-                              className={`px-3 py-2 rounded-md text-sm text-white ${
-                                remainingHere > 0 && a.vendorUserId
+                              className={`px-3 py-2 rounded-md text-sm text-white ${remainingHere > 0 && a.vendorUserId
                                   ? "bg-blue-600 hover:bg-blue-700"
                                   : "bg-gray-300 cursor-not-allowed"
-                              }`}
+                                }`}
                             >
-                           Send To Transporter 
+                              Send To Transporter
                             </button>
                             <button
                               type="button"
                               onClick={() => removeAllocation(a.id)}
                               disabled={used > 0}
-                              className={`px-3 py-2 rounded-md text-sm ${
-                                used > 0
+                              className={`px-3 py-2 rounded-md text-sm ${used > 0
                                   ? "bg-gray-100 text-gray-400 cursor-not-allowed"
                                   : "bg-red-50 text-red-600 hover:bg-red-100"
-                              }`}
+                                }`}
                             >
                               Remove
                             </button>
@@ -842,10 +1116,9 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                   {(() => {
                     const alloc = allocations.find((a) => a.id === activeAllocationId)!;
                     const used = vehiclesByAllocation(activeAllocationId);
-                    return `For ${
-                      (vendors || []).find((v) => v._id === alloc.vendorUserId)?.name ??
+                    return `For ${(vendors || []).find((v) => v._id === alloc.vendorUserId)?.name ??
                       "Transporter"
-                    } • Remaining: ${Math.max(0, (alloc?.count || 0) - used)}`;
+                      } • Remaining: ${Math.max(0, (alloc?.count || 0) - used)}`;
                   })()}
                 </span>
               </div>
@@ -909,9 +1182,8 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                     onChange={(e) =>
                       setVehicleDraft((prev) => ({ ...prev, vehicleNumber: e.target.value }))
                     }
-                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${
-                      errors.vehicleNumber ? "border-red-500" : "border-gray-300"
-                    }`}
+                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${errors.vehicleNumber ? "border-red-500" : "border-gray-300"
+                      }`}
                     placeholder="e.g., MH12AB## (## auto-numbers to 01, 02, ...)"
                   />
                   {errors.vehicleNumber && (
@@ -932,9 +1204,8 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                         estimatedArrival: e.target.value,
                       }))
                     }
-                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${
-                      errors.estimatedArrival ? "border-red-500" : "border-gray-300"
-                    }`}
+                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${errors.estimatedArrival ? "border-red-500" : "border-gray-300"
+                      }`}
                   />
                   {errors.estimatedArrival && (
                     <p className="text-red-600 text-sm mt-1">{errors.estimatedArrival}</p>
@@ -954,9 +1225,8 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                         estimatedDeparture: e.target.value,
                       }))
                     }
-                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${
-                      errors.estimatedDeparture ? "border-red-500" : "border-gray-300"
-                    }`}
+                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${errors.estimatedDeparture ? "border-red-500" : "border-gray-300"
+                      }`}
                   />
                   {errors.estimatedDeparture && (
                     <p className="text-red-600 text-sm mt-1">{errors.estimatedDeparture}</p>
@@ -973,9 +1243,8 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                     onChange={(e) =>
                       setVehicleDraft((prev) => ({ ...prev, driverName: e.target.value }))
                     }
-                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${
-                      errors.driverName ? "border-red-500" : "border-gray-300"
-                    }`}
+                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${errors.driverName ? "border-red-500" : "border-gray-300"
+                      }`}
                     placeholder="Enter driver name"
                   />
                   {errors.driverName && (
@@ -993,9 +1262,8 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                     onChange={(e) =>
                       setVehicleDraft((prev) => ({ ...prev, driverMobile: e.target.value }))
                     }
-                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${
-                      errors.driverMobile ? "border-red-500" : "border-gray-300"
-                    }`}
+                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${errors.driverMobile ? "border-red-500" : "border-gray-300"
+                      }`}
                     placeholder="Enter driver mobile number"
                   />
                   {errors.driverMobile && (

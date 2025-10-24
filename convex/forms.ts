@@ -87,6 +87,217 @@ export const generateRefId = internalMutation({
   },
 });
 
+// Create transportVehicles for a form (after createForm) so vendors can fill Transport Details
+export const createTransportVehiclesForForm = mutation({
+  args: {
+    formId: v.id("transportForms"),
+    vehicles: v.array(
+      v.object({
+        allocationId: v.optional(v.string()),
+        assignedTransporterId: v.optional(v.id("users")),
+        transporterName: v.optional(v.string()),
+        contactPerson: v.optional(v.string()),
+        contactMobile: v.optional(v.string()),
+        vehicleNumber: v.optional(v.string()),
+        driverName: v.optional(v.string()),
+        driverMobile: v.optional(v.string()),
+        estimatedDeparture: v.optional(v.number()),
+        estimatedArrival: v.optional(v.number()),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const { userId } = await checkPermission(ctx, "forms.edit");
+
+    const form = await ctx.db.get(args.formId);
+    if (!form || form.isDeleted) throw new Error("Form not found");
+
+    const now = Date.now();
+    for (const vdata of args.vehicles) {
+      await ctx.db.insert("transportVehicles", {
+        formId: args.formId,
+        allocationId: vdata.allocationId,
+        assignedTransporterId: vdata.assignedTransporterId,
+        transporterName: vdata.transporterName || "",
+        contactPerson: vdata.contactPerson,
+        contactMobile: vdata.contactMobile,
+        vehicleNumber: vdata.vehicleNumber,
+        driverName: vdata.driverName,
+        driverMobile: vdata.driverMobile,
+        estimatedDeparture: vdata.estimatedDeparture,
+        estimatedArrival: vdata.estimatedArrival,
+        status: "draft",
+        createdAt: now,
+        updatedAt: now,
+        updatedBy: userId,
+      } as any);
+
+      // Notify assigned vendor
+      if (vdata.assignedTransporterId) {
+        try {
+          await ctx.runMutation(internal.notifications.sendNotification, {
+            userId: vdata.assignedTransporterId,
+            type: "form_assigned",
+            title: `New vehicle assigned for ${form.refId}`,
+            message: `You have been assigned a vehicle on form ${form.refId}. Please fill Transport Details.`,
+            data: { formId: args.formId, refId: (form as any).refId },
+          });
+        } catch {}
+      }
+    }
+
+    await ctx.runMutation(internal.audit.logAction, {
+      entityType: "transportForm",
+      entityId: args.formId,
+      action: "create_assignments",
+      userId,
+      changes: { after: { vehiclesCreated: args.vehicles.length } },
+    });
+
+    return { success: true };
+  },
+});
+
+// Vendor: list assignments for a specific form
+export const getVendorAssignmentsForForm = query({
+  args: { formId: v.id("transportForms") },
+  handler: async (ctx, { formId }) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Not authenticated");
+
+    const role = await ctx.db
+      .query("userRoles")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .filter((q) => q.eq(q.field("isActive"), true))
+      .first();
+    if (!role || role.role !== "vendor") throw new Error("Access denied");
+
+    const items = await ctx.db
+      .query("transportVehicles")
+      .withIndex("by_form", (q) => q.eq("formId", formId))
+      .filter((q) => q.eq(q.field("assignedTransporterId"), userId))
+      .collect();
+
+    return items;
+  },
+});
+
+// Admin/Employee: get all vehicles for a form
+export const getVehiclesForForm = query({
+  args: { formId: v.id("transportForms") },
+  handler: async (ctx, { formId }) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Not authenticated");
+
+    const form: any = await ctx.db.get(formId);
+    if (!form || form.isDeleted) throw new Error("Form not found");
+
+    const userRole = await ctx.db
+      .query("userRoles")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .filter((q) => q.eq(q.field("isActive"), true))
+      .first();
+
+    const canView = userRole?.role === "admin" || (userRole?.role === "employee" && form.employeeId === userId);
+    if (!canView) throw new Error("Access denied");
+
+    const vehicles = await ctx.db
+      .query("transportVehicles")
+      .withIndex("by_form", (q) => q.eq("formId", formId))
+      .collect();
+    return vehicles;
+  },
+});
+
+// Vendor submits Transport Details for an assigned vehicle; updates parent form snapshot too
+export const vendorSubmitTransportDetails = mutation({
+  args: {
+    vehicleId: v.id("transportVehicles"),
+    transporterName: v.string(),
+    ContactPerson: v.string(),
+    ContactPersonMobile: v.string(),
+    vehicleNumber: v.string(),
+    driverName: v.string(),
+    driverMobile: v.string(),
+    estimatedDeparture: v.number(),
+    estimatedArrival: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Not authenticated");
+
+    const role = await ctx.db
+      .query("userRoles")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .filter((q) => q.eq(q.field("isActive"), true))
+      .first();
+    if (!role || role.role !== "vendor") throw new Error("Access denied");
+
+    const vehicle: any = await ctx.db.get(args.vehicleId);
+    if (!vehicle) throw new Error("Assignment not found");
+    if (vehicle.assignedTransporterId !== userId) throw new Error("Not your assignment");
+
+    const now = Date.now();
+    await ctx.db.patch(args.vehicleId, {
+      transporterName: args.transporterName,
+      contactPerson: args.ContactPerson,
+      contactMobile: args.ContactPersonMobile,
+      vehicleNumber: args.vehicleNumber,
+      driverName: args.driverName,
+      driverMobile: args.driverMobile,
+      estimatedDeparture: args.estimatedDeparture,
+      estimatedArrival: args.estimatedArrival,
+      status: "submitted",
+      submittedAt: now,
+      updatedAt: now,
+      updatedBy: userId,
+    } as any);
+
+    // Update parent form snapshot and completion flag
+    const form: any = await ctx.db.get(vehicle.formId);
+    if (form) {
+      await ctx.db.patch(vehicle.formId, {
+        transportDetails: {
+          transporterName: args.transporterName,
+          ContactPerson: args.ContactPerson,
+          ContactPersonMobile: args.ContactPersonMobile,
+          vehicleNumber: args.vehicleNumber,
+          driverName: args.driverName,
+          driverMobile: args.driverMobile,
+          estimatedDeparture: args.estimatedDeparture,
+          estimatedArrival: args.estimatedArrival,
+        },
+        completionStatus: {
+          ...form.completionStatus,
+          transportDetailsComplete: true,
+        },
+        updatedAt: now,
+      });
+
+      // Notify the form owner (employee) that vendor submitted details
+      try {
+        await ctx.runMutation(internal.notifications.sendNotification, {
+          userId: form.employeeId,
+          type: "vendor_submitted",
+          title: `Vendor submitted details for ${form.refId}`,
+          message: `Transport details have been submitted for an assigned vehicle.`,
+          data: { formId: vehicle.formId, vehicleId: args.vehicleId, refId: form.refId },
+        });
+      } catch {}
+    }
+
+    await ctx.runMutation(internal.audit.logAction, {
+      entityType: "transportVehicle",
+      entityId: args.vehicleId,
+      action: "vendor_submit_details",
+      userId,
+      changes: { after: { status: "submitted" } },
+    });
+
+    return { success: true };
+  },
+});
+
 // Assign vendor to an allocation
 export const assignVendor = mutation({
   args: {
@@ -808,7 +1019,7 @@ export const createFormV2 = mutation({
     // Create placeholder vehicles assigned to vendors
     for (const a of args.allocations) {
       for (let i = 0; i < a.count; i++) {
-        await ctx.db.insert("transportVehicles", {
+        const vehId = await ctx.db.insert("transportVehicles", {
           formId,
           allocationId: a.id,
           assignedTransporterId: a.transporterUserId,
@@ -830,6 +1041,19 @@ export const createFormV2 = mutation({
           updatedAt: now,
           updatedBy: userId,
         } as any);
+
+        // Notify assigned vendor
+        if (a.transporterUserId) {
+          try {
+            await ctx.runMutation(internal.notifications.sendNotification, {
+              userId: a.transporterUserId,
+              type: "form_assigned",
+              title: `New vehicle assigned for ${refId}`,
+              message: `You have been assigned a vehicle on form ${refId}. Please fill Transport Details.`,
+              data: { formId, vehicleId: vehId, refId },
+            });
+          } catch {}
+        }
       }
     }
 

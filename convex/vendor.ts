@@ -1,64 +1,61 @@
 // in convex/vendor.ts
 
 import { query } from "./_generated/server";
-import { v } from "convex/values";
+import { getAuthUserId } from "@convex-dev/auth/server";
 
 // This is the function you are trying to call.
 // Notice it is a NAMED EXPORT, not a default export.
 export const listAssignedForms = query({
   handler: async (ctx) => {
-    // 1. Get the identity of the currently logged-in user.
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      // If no user is logged in, return an empty array.
-      return [];
-    }
+    // Get logged-in user (vendor)
+    const userId = await getAuthUserId(ctx);
+    if (!userId) return [];
 
-    // The 'subject' from the JWT token is typically the user's ID in the `users` table.
-    const user = await ctx.db
-      .query("users")
-      .withIndex("email", (q) => q.eq("email", identity.tokenIdentifier))
-      .unique();
+    // Ensure the user has an active vendor role
+    const role = await ctx.db
+      .query("userRoles")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .filter((q) => q.eq(q.field("isActive"), true))
+      .first();
+    if (!role || role.role !== "vendor") return [];
 
-    if (!user || user.name !== "vendor") {
-      // If the user isn't found or is not a vendor, they have no assigned forms.
-      return [];
-    }
-    
-    // 2. Find all allocations assigned to this vendor user.
-    const allocations = await ctx.db
-      .query("allocations")
-      .withIndex("by_vendor", (q) => q.eq("vendorUserId", user._id))
+    // Find vehicles assigned to this vendor
+    // Prefer an index on assignedTransporterId if available; otherwise filter.
+    const vehicles = await ctx.db
+      .query("transportVehicles")
+      .filter((q) => q.eq(q.field("assignedTransporterId"), userId))
       .collect();
 
-    // 3. For each allocation, fetch the full parent booking details.
-    const assignedForms = await Promise.all(
-      allocations.map(async (allocation) => {
-        // Fetch the main booking document
-        const booking = await ctx.db.get(allocation._id);
-        
-        // Fetch transport details submitted for this allocation (if any)
-        const transportDetails = await ctx.db
-          .query("allocations")
-          .withIndex("by_vendor", (q) => q.eq("vendorUserId", allocation.vendorUserId))
-          .collect();
+    if (vehicles.length === 0) return [];
 
-        // Combine the data into a useful structure for the frontend
-        return {
-          // Spread the booking details
-          ...booking, 
-          // Add specific allocation info
-          allocationId: allocation._id,
-          allocatedVehicles: allocation._creationTime,
-          allocationStatus: allocation._creationTime,
-          // Add submitted transport details
-          submittedVehicles: transportDetails,
-        };
-      })
-    );
+    // Aggregate per formId
+    const grouped = new Map<string, { total: number; submitted: number }>();
+    for (const v of vehicles as any[]) {
+      const fid = (v.formId as string) || (v.formId?.id as string);
+      if (!fid) continue;
+      const acc = grouped.get(fid) || { total: 0, submitted: 0 };
+      acc.total += 1;
+      if (v.status === "submitted") acc.submitted += 1;
+      grouped.set(fid, acc);
+    }
 
-    // Filter out any results where the booking might have been deleted
-    return assignedForms.filter(form => form._id);
+    // Join back to forms for refId and createdAt
+    const results: { formId: any; refId: string; total: number; submitted: number; createdAt?: number }[] = [];
+    for (const [fid, agg] of grouped) {
+      const form: any = await ctx.db.get(fid as any);
+      if (!form || form.isDeleted) continue;
+      results.push({
+        formId: fid as any,
+        refId: form.refId,
+        total: agg.total,
+        submitted: agg.submitted,
+        createdAt: form.createdAt,
+      });
+    }
+
+    // Newest first
+    results.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    return results;
   },
 });
 

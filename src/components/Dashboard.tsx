@@ -3,7 +3,7 @@ import { api } from "../../convex/_generated/api";
 import { EmployeeDashboard } from "./EmployeeDashboard";
 import { AdminDashboard } from "./AdminDashboard";
 import { VendorDashboard } from "./VendorDashboard";
-import { OrderPlacerDashboard } from "./OrderPlacerDashboard";
+// import { OrderPlacerDashboard } from "./OrderPlacerDashboard";
 
 interface User {
   _id: string;
@@ -36,8 +36,8 @@ export function Dashboard({ user }: DashboardProps) {
       return <AdminDashboard user={user} />;
     case "vendor":
       return <VendorDashboard user={user} />;
-    case "order_placer":
-      return <OrderPlacerDashboard user={user} />;
+    // case "order_placer":
+    //   return <OrderPlacerDashboard user={user} />;
     default:
       return (
         <div className="flex justify-center items-center min-h-96">
