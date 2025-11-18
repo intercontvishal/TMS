@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import * as XLSX from "xlsx";
+import { saveAs } from "file-saver";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { toast } from "sonner";
@@ -9,7 +11,7 @@ interface User {
   _id: string;
   name?: string;
   email?: string;
-  role: "employee" | "admin" | "vendor" | "order_placer" | null;
+  role: "employee" | "admin" | "vendor" | "order_placer" | "transporter" | null;
   permissions: string[];
 }
 
@@ -29,8 +31,156 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
   const submitForm = useMutation(api.forms.submitForm);
   const vendorAssignments = user.role === "vendor" ? (useQuery(api.forms.getVendorAssignmentsForForm, { formId: formId as any }) || []) : [];
   const allVehicles = user.role !== "vendor" ? (useQuery(api.forms.getVehiclesForForm, { formId: formId as any }) || []) : [];
+  const vehiclesForStatus = (user.role !== "vendor" ? allVehicles : vendorAssignments) || [];
   const submitVendorDetails = useMutation(api.forms.vendorSubmitTransportDetails);
   const [vendorEdits, setVendorEdits] = useState<Record<string, any>>({});
+
+  // Fetch vendors to resolve vendorUserId -> name for allocations
+  const vendors = useQuery(api.users.getVendors, {}) || [];
+  const vendorMap = useMemo(() => {
+    const m = new Map<string, string>();
+    (vendors as any[]).forEach((v) => m.set(String(v._id), v.name));
+    return m;
+  }, [vendors]);
+
+  const allVehiclesSubmittedForForm = useMemo(() => {
+    const vehicles = Array.isArray(allVehicles) ? (allVehicles as any[]) : [];
+    if (!vehicles.length) return false;
+    return vehicles.every((v) => v.status === "submitted");
+  }, [allVehicles]);
+
+  const canDownloadExcel = (user.role === "admin" || user.role === "employee") &&
+    !!form &&
+    ((form.status === "completed" || form.completionStatus?.overallComplete || allVehiclesSubmittedForForm));
+
+  const downloadExcel = () => {
+    if (!form) {
+      toast.error("Form not loaded.");
+      return;
+    }
+    try {
+      const wb = XLSX.utils.book_new();
+
+      // Booking & Shipment Details sheet (single row)
+      const bd = form.bookingDetails || {};
+      const bookingRow = [{
+        bookingNo: bd.bookingNo || "",
+        poNumber: bd.poNumber || "",
+        shipperName: bd.shipperName || "",
+        pod: bd.pod || "",
+        vessel: bd.vessel || "",
+        stuffingDate: bd.stuffingDate ? new Date(bd.stuffingDate).toLocaleDateString() : "",
+        cutoffDate: bd.cutoffDate ? new Date(bd.cutoffDate).toLocaleDateString() : "",
+        stuffingPlace: bd.stuffingPlace || "",
+        commodity: bd.commodity || "",
+        catagory: bd.catagory || "",
+        placementDate: bd.placementDate ? new Date(bd.placementDate).toLocaleDateString() : "",
+        factory: bd.factory || "",
+        cleranceLocation: (bd as any).cleranceLocation || "",
+        cargoWt: (bd as any).cargoWt || "",
+        vehicalQty: (bd as any).vehicalQty || "",
+        remark: (bd as any).remark || "",
+      }];
+      const wsBooking = XLSX.utils.json_to_sheet(bookingRow);
+      XLSX.utils.book_append_sheet(wb, wsBooking, "Booking");
+
+      // Transporter Allocations sheet
+      const allocs = ((form.allocations || []) as any[]).map((a) => ({
+        allocationId: a.id || "",
+        vendorUserId: a.vendorUserId ? String(a.vendorUserId) : "",
+        vendorName: vendorMap.get(String(a.vendorUserId)) || (a.vendorName || ""),
+        count: a.count || 0,
+      }));
+      const wsAllocs = XLSX.utils.json_to_sheet(allocs);
+      XLSX.utils.book_append_sheet(wb, wsAllocs, "Allocations");
+
+      // Transport Details (vehicles) sheet
+      const vehicles = Array.isArray(allVehicles) ? (allVehicles as any[]) : [];
+      const allocationsForLookup = Array.isArray(form.allocations) ? (form.allocations as any[]) : [];
+      const getVendorNameForVehicle = (v: any) => {
+        if (v.assignedTransporterId) {
+          const viaId = vendorMap.get(String(v.assignedTransporterId));
+          if (viaId) return viaId;
+        }
+        if (v.allocationId) {
+          const alloc = allocationsForLookup.find((a: any) => a.id === v.allocationId);
+          if (alloc) {
+            const nameFromMap = vendorMap.get(String(alloc.vendorUserId));
+            return nameFromMap || alloc.vendorName || alloc.transporterName || "";
+          }
+        }
+        return v.transporterName || "";
+      };
+
+      const vehicleRows = vehicles.map((v) => ({
+        vendorName: getVendorNameForVehicle(v) || "Unassigned",
+        transporterName: v.transporterName || "",
+        vehicleNumber: v.vehicleNumber || "",
+        driverName: v.driverName || "",
+        driverMobile: v.driverMobile || "",
+        containerNumber: v.containerNumber || "",
+        sealNumber: v.sealNumber || "",
+        status: v.status || "",
+      }));
+      const tdHeaders = [
+        "Vendor",
+        "Transporter Name",
+        "Vehicle Number",
+        "Driver Name",
+        "Driver Mobile",
+        "Container Number",
+        "Seal Number",
+        "Status",
+      ];
+      const tdData = vehicleRows.map((r) => [
+        r.vendorName,
+        r.transporterName,
+        r.vehicleNumber,
+        r.driverName,
+        r.driverMobile,
+        r.containerNumber,
+        r.sealNumber,
+        r.status,
+      ]);
+      const wsVehicles = XLSX.utils.aoa_to_sheet([tdHeaders, ...tdData]);
+      XLSX.utils.book_append_sheet(wb, wsVehicles, "Transport Details");
+
+      // Grouped Vendor Transport Details sheet
+      const grouped = new Map<string, any[]>();
+      for (const row of vehicleRows) {
+        const key = row.vendorName || "Unassigned";
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key)!.push(row);
+      }
+      const vtdHeaders = tdHeaders;
+      const vendorAoA: any[] = [vtdHeaders];
+      for (const [vendor, rows] of grouped) {
+        vendorAoA.push([`Vendor: ${vendor}`, "", "", "", "", "", "", ""]);
+        for (const r of rows) {
+          vendorAoA.push([
+            r.vendorName,
+            r.transporterName,
+            r.vehicleNumber,
+            r.driverName,
+            r.driverMobile,
+            r.containerNumber,
+            r.sealNumber,
+            r.status,
+          ]);
+        }
+        vendorAoA.push(["", "", "", "", "", "", "", ""]);
+      }
+      const wsVendor = XLSX.utils.aoa_to_sheet(vendorAoA);
+      XLSX.utils.book_append_sheet(wb, wsVendor, "Vendor Transport Details");
+
+      const arrayBuf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+      const filename = `Form_${form.refId}.xlsx`;
+      const blob = new Blob([arrayBuf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      saveAs(blob, filename);
+    } catch (e) {
+      toast.error("Failed to export Excel: " + (e as Error).message);
+    }
+  };
 
   const handleSubmitForm = async () => {
     try {
@@ -45,22 +195,17 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
     try {
       const vid = veh._id as string;
       const data = vendorEdits[vid] || {};
-      const depMs = data.estimatedDeparture
-        ? new Date(data.estimatedDeparture).getTime()
-        : (veh.estimatedDeparture ?? Date.now());
-      const arrMs = data.estimatedArrival
-        ? new Date(data.estimatedArrival).getTime()
-        : (veh.estimatedArrival ?? Date.now());
       await submitVendorDetails({
         vehicleId: vid as any,
         transporterName: data.transporterName ?? veh.transporterName ?? "",
-        ContactPerson: data.ContactPerson ?? veh.contactPerson ?? "",
-        ContactPersonMobile: data.ContactPersonMobile ?? veh.contactMobile ?? "",
+        // ContactPerson:  data.ContactPerson ?? veh.contactPerson ?? "",
+        // ContactPersonMobile: data.ContactPersonMobile ?? veh.contactMobile ?? "",
         vehicleNumber: data.vehicleNumber ?? veh.vehicleNumber ?? "",
+        containerNumber: data.containerNumber ?? veh.containerNumber ?? undefined,
+        sealNumber: data.sealNumber ?? veh.sealNumber ?? undefined,
         driverName: data.driverName ?? veh.driverName ?? "",
         driverMobile: data.driverMobile ?? veh.driverMobile ?? "",
-        estimatedDeparture: depMs,
-        estimatedArrival: arrMs,
+
       });
       toast.success("Transport details submitted");
     } catch (e) {
@@ -106,12 +251,13 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
             }`}>
               {form.status}
             </span>
-            {canSubmit && (
+            {canDownloadExcel && (
               <button
-                onClick={handleSubmitForm}
-                className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 font-medium"
+                onClick={downloadExcel}
+                className="px-3 py-2 border rounded-md bg-white hover:bg-gray-50 text-sm"
+                title="Download form as Excel"
               >
-                Submit Form
+                Download Excel
               </button>
             )}
           </div>
@@ -129,10 +275,10 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
               <div className={`w-3 h-3 rounded-full ${form.completionStatus.bookingDetailsComplete ? "bg-green-500" : "bg-gray-300"}`}></div>
               <span>Booking Details</span>
             </div>
-            <div className="flex items-center space-x-2">
+            {/* <div className="flex items-center space-x-2">
               <div className={`w-3 h-3 rounded-full ${form.completionStatus.containersComplete ? "bg-green-500" : "bg-gray-300"}`}></div>
               <span>Containers ({containers.length})</span>
-            </div>
+            </div> */}
             <div className="flex items-center space-x-2">
               <div className={`w-3 h-3 rounded-full ${form.completionStatus.photosComplete ? "bg-green-500" : "bg-gray-300"}`}></div>
               <span>Photos ({photos.length})</span>
@@ -146,7 +292,7 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
         <nav className="-mb-px flex space-x-8">
           {[
             { id: "details", label: "Form Details" },
-            { id: "containers", label: `Containers (${containers.length})` },
+            // { id: "containers", label: `Containers (${containers.length})` },
             { id: "photos", label: `Photos (${photos.length})` },
           ].map((tab) => (
             <button
@@ -193,7 +339,7 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            PO Number
+            Line
           </label>
           <input
             type="text"
@@ -204,25 +350,27 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
           />
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Total Vehicles / Containers
-          </label>
-          <input
-            type="text"
-            value={form.bookingDetails?.vehicalQty ?? ""}
-            readOnly
-            disabled
-            className="w-full border border-gray-300 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
-          />
-          <p className="text-xs text-gray-500 mt-1">
-            {(() => {
-              const total = Number.parseInt(form.bookingDetails?.vehicalQty || "0", 10) || 0;
-              const allocatedCount = (form.allocations || []).reduce((s: number, a: any) => s + (a.count || 0), 0);
-              return `Allocated: ${allocatedCount} / ${total}`;
-            })()}
-          </p>
-        </div>
+        {user.role !== "vendor" && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Total Vehicles / Containers
+            </label>
+            <input
+              type="text"
+              value={form.bookingDetails?.vehicalQty ?? ""}
+              readOnly
+              disabled
+              className="w-full border border-gray-300 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              {(() => {
+                const total = Number.parseInt(form.bookingDetails?.vehicalQty || "0", 10) || 0;
+                const allocatedCount = (form.allocations || []).reduce((s: number, a: any) => s + (a.count || 0), 0);
+                return `Allocated: ${allocatedCount} / ${total}`;
+              })()}
+            </p>
+          </div>
+        )}
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -239,11 +387,37 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            Customer
+            Vessel
           </label>
           <input
             type="text"
             value={form.bookingDetails?.vessel || ""}
+            readOnly
+            disabled
+            className="w-full border border-gray-300 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            POD
+          </label>
+          <input
+            type="text"
+            value={form.bookingDetails?.pod || ""}
+            readOnly
+            disabled
+            className="w-full border border-gray-300 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Cargo Weight
+          </label>
+          <input
+            type="text"
+            value={form.bookingDetails?.cargoWt || ""}
             readOnly
             disabled
             className="w-full border border-gray-300 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
@@ -427,7 +601,12 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
           {!(form.allocations && form.allocations.length) ? (
             <p className="text-sm text-gray-500">No transporters allocated yet.</p>
           ) : (
-            (form.allocations || []).map((a: any) => {
+            (((form.allocations || []) as any[])
+              .filter((a: any) => {
+                if (user.role !== "vendor") return true;
+                return (a as any).vendorUserId === user._id;
+              })
+            ).map((a: any) => {
               // const used = (form.vehicles || []).filter((v: any) => v.allocationId === a.id).length;
               return (
                 <div key={a.id} className="border rounded-md p-3">
@@ -438,38 +617,20 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
                       </label>
                       <input
                         type="text"
-                        value={a.transporterName || a.vendorName || form.transportDetails?.transporterName || ""}
+                        value={
+                          vendorMap.get(String((a as any).vendorUserId)) ||
+                          a.transporterName ||
+                          (a as any).vendorName ||
+                          form.transportDetails?.transporterName ||
+                          (user.role === "vendor" ? (user.name || "") : "")
+                        }
                         readOnly
                         disabled
                         className="w-full border border-gray-300 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">
-                        Contact Person
-                      </label>
-                      <input
-                        type="text"
-                        value={a.contactPerson || ""}
-                        readOnly
-                        disabled
-                        className="w-full border border-gray-300 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">
-                        Contact Mobile
-                      </label>
-                      <input
-                        type="text"
-                        value={a.contactMobile || ""}
-                        readOnly
-                        disabled
-                        className="w-full border border-gray-300 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                      <label className=" text-xs font-medium text-gray-700 mb-1">
                         Vehicles Allocated
                       </label>
                       <input
@@ -480,7 +641,41 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
                         className="w-full border border-gray-300 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
                       />
                     </div>
-                    <div className="flex items-end gap-2">no actions in view-only </div>
+                    <div className="flex items-end">
+                      {(() => {
+                        const vehicles = Array.isArray(vehiclesForStatus) ? (vehiclesForStatus as any[]) : [];
+                        const allocCount = Number(a.count || 0);
+                        const allocationId = a.id;
+                        const vendorUserId = (a as any).vendorUserId;
+                        const allocTransporterName = a.transporterName || (a as any).vendorName;
+
+                        let vehiclesForAlloc: any[] = [];
+                        if (allocationId) {
+                          vehiclesForAlloc = vehicles.filter((v: any) => v.allocationId === allocationId);
+                        }
+                        if (!vehiclesForAlloc.length && vendorUserId) {
+                          vehiclesForAlloc = vehicles.filter((v: any) => v.assignedTransporterId === vendorUserId);
+                        }
+                        if (!vehiclesForAlloc.length && allocTransporterName) {
+                          vehiclesForAlloc = vehicles.filter((v: any) => (v.transporterName || "").toLowerCase() === String(allocTransporterName).toLowerCase());
+                        }
+
+                        const haveAllCreated = vehiclesForAlloc.length >= allocCount && allocCount > 0;
+                        const allVehiclesSubmitted = vehiclesForAlloc.length > 0 && vehiclesForAlloc.every((v: any) => v.status === "submitted");
+                        const submitted = user.role === "vendor"
+                          ? allVehiclesSubmitted // vendor sees Submitted once all their matched vehicles are submitted
+                          : (haveAllCreated && allVehiclesSubmitted); // employee/admin requires count met and all submitted
+                        return (
+                          <span
+                            className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                              submitted ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
+                            }`}
+                          >
+                            Transport Details: {submitted ? "Submitted" : "Pending"}
+                          </span>
+                        );
+                      })()}
+                    </div>
                   </div>
                 </div>
               );
@@ -488,9 +683,9 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
           )}
         </div>
       </div>
-      
+          
 
-      {user.role !== "vendor" && (
+      {(user.role === "admin" || user.role === "employee" || user.role === "transporter") && (
         <div className="mt-8">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-base font-semibold text-gray-900">Vendor Transport Details</h3>
@@ -502,12 +697,24 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
               {(allVehicles as any[]).map((veh: any) => (
                 <div key={veh._id} className="border rounded-md p-3 bg-white">
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
-                    <div><span className="text-gray-500">Transporter: </span>{veh.transporterName || "-"}</div>
-                    <div><span className="text-gray-500">Contact: </span>{veh.contactPerson || "-"} {veh.contactMobile ? `(${veh.contactMobile})` : ""}</div>
+                    <div><span className="text-gray-500">Transporter: </span>{(() => {
+                      if (veh.assignedTransporterId) {
+                        const viaId = vendorMap.get(String(veh.assignedTransporterId));
+                        if (viaId) return viaId;
+                      }
+                      if (veh.allocationId && Array.isArray(form.allocations)) {
+                        const alloc = (form.allocations as any[]).find((a: any) => a.id === veh.allocationId);
+                        if (alloc) {
+                          const nameFromMap = vendorMap.get(String((alloc as any).vendorUserId));
+                          return nameFromMap || (alloc as any).vendorName || alloc.transporterName || (veh.transporterName || "-");
+                        }
+                      }
+                      return veh.transporterName || "-";
+                    })()}</div>
+                    <div><span className="text-gray-500">Container Number: </span>{veh.containerNumber || "-"}</div>
+                    <div><span className="text-gray-500">Seal Number: </span>{veh.sealNumber || "-"}</div>
                     <div><span className="text-gray-500">Vehicle: </span>{veh.vehicleNumber || "-"}</div>
                     <div><span className="text-gray-500">Driver: </span>{veh.driverName || "-"} {veh.driverMobile ? `(${veh.driverMobile})` : ""}</div>
-                    <div><span className="text-gray-500">ETD: </span>{veh.estimatedDeparture ? new Date(veh.estimatedDeparture).toLocaleDateString() : "-"}</div>
-                    <div><span className="text-gray-500">ETA: </span>{veh.estimatedArrival ? new Date(veh.estimatedArrival).toLocaleDateString() : "-"}</div>
                     <div><span className="text-gray-500">Status: </span>{veh.status}</div>
                   </div>
                 </div>
@@ -544,26 +751,26 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
                       <div>
                         <label className="block text-xs font-medium text-gray-700 mb-1">Transporter Name</label>
                         <input
-                          value={getVal("transporterName", veh.transporterName)}
+                          value={getVal("transporterName", veh.transporterName || user.name || "")}
                           onChange={(e) => setVendorEdits((s) => ({ ...s, [vid]: { ...s[vid], transporterName: e.target.value } }))}
                           disabled={disabled}
                           className="w-full border border-gray-300 rounded-md px-3 py-2"
                         />
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Contact Person</label>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Container Number</label>
                         <input
-                          value={getVal("ContactPerson", veh.contactPerson)}
-                          onChange={(e) => setVendorEdits((s) => ({ ...s, [vid]: { ...s[vid], ContactPerson: e.target.value } }))}
+                          value={getVal("containerNumber", veh.containerNumber)}
+                          onChange={(e) => setVendorEdits((s) => ({ ...s, [vid]: { ...s[vid], containerNumber: e.target.value } }))}
                           disabled={disabled}
                           className="w-full border border-gray-300 rounded-md px-3 py-2"
                         />
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Contact Mobile</label>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Seal Number</label>
                         <input
-                          value={getVal("ContactPersonMobile", veh.contactMobile)}
-                          onChange={(e) => setVendorEdits((s) => ({ ...s, [vid]: { ...s[vid], ContactPersonMobile: e.target.value } }))}
+                          value={getVal("sealNumber", veh.sealNumber)}
+                          onChange={(e) => setVendorEdits((s) => ({ ...s, [vid]: { ...s[vid], sealNumber: e.target.value } }))}
                           disabled={disabled}
                           className="w-full border border-gray-300 rounded-md px-3 py-2"
                         />
@@ -595,26 +802,7 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
                           className="w-full border border-gray-300 rounded-md px-3 py-2"
                         />
                       </div>
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Estimated Departure (ms)</label>
-                        <input
-                          type="date"
-                          value={getVal("estimatedDeparture", toInputDate(veh.estimatedDeparture))}
-                          onChange={(e) => setVendorEdits((s) => ({ ...s, [vid]: { ...s[vid], estimatedDeparture: e.target.value } }))}
-                          disabled={disabled}
-                          className="w-full border border-gray-300 rounded-md px-3 py-2"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Estimated Arrival (ms)</label>
-                        <input
-                          type="date"
-                          value={getVal("estimatedArrival", toInputDate(veh.estimatedArrival))}
-                          onChange={(e) => setVendorEdits((s) => ({ ...s, [vid]: { ...s[vid], estimatedArrival: e.target.value } }))}
-                          disabled={disabled}
-                          className="w-full border border-gray-300 rounded-md px-3 py-2"
-                        />
-                      </div>
+                      
                     </div>
                     <div className="mt-4">
                       <button
@@ -637,9 +825,9 @@ export function FormViewer({ formId, onBack, user }: FormViewerProps) {
   </div>
 )}
 
-{activeTab === "containers" && (
+{/* {activeTab === "containers" && (
   <ContainerManager formId={formId} canEdit={canEdit} />
-)}
+)} */}
 
       {activeTab === "photos" && (
         <PhotoManager formId={formId} containers={containers} canUpload={canEdit || user.role === "vendor"} />

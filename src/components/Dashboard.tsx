@@ -3,13 +3,14 @@ import { api } from "../../convex/_generated/api";
 import { EmployeeDashboard } from "./EmployeeDashboard";
 import { AdminDashboard } from "./AdminDashboard";
 import { VendorDashboard } from "./VendorDashboard";
+import { TransporterDashboard } from "./TransporterDashboard";
 // import { OrderPlacerDashboard } from "./OrderPlacerDashboard";
 
 interface User {
   _id: string;
   name?: string;
   email?: string;
-  role: "employee" | "admin" | "vendor" | "order_placer" | null;
+  role: "employee" | "admin" | "vendor" | "order_placer" | "transporter" | null;
   permissions: string[];
 }
 
@@ -36,6 +37,8 @@ export function Dashboard({ user }: DashboardProps) {
       return <AdminDashboard user={user} />;
     case "vendor":
       return <VendorDashboard user={user} />;
+    case "transporter":
+      return <TransporterDashboard user={user} />;
     // case "order_placer":
     //   return <OrderPlacerDashboard user={user} />;
     default:

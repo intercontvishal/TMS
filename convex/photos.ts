@@ -208,11 +208,14 @@ export const getPhotos = query({
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .filter((q) => q.eq(q.field("isActive"), true))
       .first();
-    
-    const canView = userRole?.role === "admin" || 
-                   (userRole?.role === "employee" && form.employeeId === userId) ||
-                   userRole?.permissions.includes("forms.view_assigned");
-    
+  
+    const canView =
+      userRole?.role === "admin" ||
+      (userRole?.role === "employee" && form.employeeId === userId) ||
+      userRole?.role === "transporter" ||
+      userRole?.permissions.includes("forms.view_readonly") ||
+      userRole?.permissions.includes("forms.view_assigned");
+  
     if (!canView) {
       throw new Error("Access denied");
     }

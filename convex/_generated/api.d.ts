@@ -19,6 +19,7 @@ import type * as auth from "../auth.js";
 import type * as containers from "../containers.js";
 import type * as forms from "../forms.js";
 import type * as http from "../http.js";
+import type * as maintenance from "../maintenance.js";
 import type * as notifications from "../notifications.js";
 import type * as photos from "../photos.js";
 import type * as router from "../router.js";
@@ -41,6 +42,7 @@ declare const fullApi: ApiFromModules<{
   containers: typeof containers;
   forms: typeof forms;
   http: typeof http;
+  maintenance: typeof maintenance;
   notifications: typeof notifications;
   photos: typeof photos;
   router: typeof router;

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useMemo, useState, useCallback } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { toast } from "sonner";
@@ -10,34 +10,21 @@ interface FormCreatorProps {
 type Vehicle = {
   allocationId: string;
   transporterName: string;
-  ContactPerson: string;
-  ContactPersonMobile: string;
-  // CargoVolume: string;
-  // ContainerType: string;
-  // VehicleSize: string;
-  // ContainerSize: string;
-  // weight: string;
+  containerNumber: string;
+  sealNumber: string;
   vehicleNumber: string;
   driverName: string;
   driverMobile: string;
-  estimatedDeparture: string; // yyyy-mm-dd
-  estimatedArrival: string;   // yyyy-mm-dd
 };
 
 type Allocation = {
   id: string; // local row id
   vendorUserId: string; // selected vendor's user id
-  contactPerson: string;
-  contactMobile: string;
-  // containerType: string;
-  // vehicleSize: string;
-  // containerSize: string;
-  // weight: string;
-  // cargoVolume: string;
+  // contactPerson?: string;
+  // contactMobile?: string;
   count: number;
 };
 
-// NEW: This type is now correctly placed outside the component.
 type DocItem = {
   id: string;
   file: File;
@@ -47,214 +34,112 @@ type DocItem = {
 
 const emptyVehicleDraft = {
   transporterName: "",
-  ContactPerson: "",
-  ContactPersonMobile: "",
-  // ContainerType: "",
-  // VehicleSize: "",
-  // ContainerSize: "",
-  // weight: "",
-  // CargoVolume: "",
+  containerNumber: "",
+  sealNumber: "",
   vehicleNumber: "",
   driverName: "",
   driverMobile: "",
-  estimatedDeparture: "",
-  estimatedArrival: "",
 };
 
 const genId = () => Math.random().toString(36).slice(2, 10);
-
 const ACCEPTED_DOC_TYPES = "image/*";
 const isImageFile = (file: File) => file.type?.startsWith("image/");
+const dateStrToMs = (s?: string) => (s ? Date.parse(s) : undefined);
+
+// Optional: centralize file size validation
+const validateImage = (file: File) => {
+  if (!isImageFile(file)) {
+    return "Please select an image file (JPEG/PNG/WebP)";
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    return "Image must be 10MB or smaller";
+  }
+  return null;
+};
 
 export function FormCreator({ onFormCreated }: FormCreatorProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Fetch vendor list for dropdown
-
-
-
-
-  const vendors = useQuery(api.users.getVendors, {}); // returns array or undefined while loading
+  const vendors = useQuery(api.users.getVendors, {}) || [];
   const createForm = useMutation(api.forms.createForm);
-  const createTransportVehiclesForForm = useMutation((api as any).forms.createTransportVehiclesForForm);
+  const createTransportVehiclesForForm = useMutation(
+    (api as any).forms.createTransportVehiclesForForm
+  );
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
   const uploadPhoto = useMutation(api.photos.uploadPhoto);
 
-  // Vehicles added across all transporters
+  // Vehicles across all transporters
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
-
-  // Transporter allocations
+  // Allocations
   const [allocations, setAllocations] = useState<Allocation[]>([]);
 
   // Bulk add panel state
   const [isAddingVehicle, setIsAddingVehicle] = useState(false);
   const [activeAllocationId, setActiveAllocationId] = useState<string | null>(null);
-  const [vehicleDraft, setVehicleDraft] = useState<typeof emptyVehicleDraft>(emptyVehicleDraft);
+  const [vehicleDraft, setVehicleDraft] =
+    useState<typeof emptyVehicleDraft>(emptyVehicleDraft);
   const [addCount, setAddCount] = useState<number>(1);
   const [errors, setErrors] = useState<Record<string, string>>({});
+
   // Booking details
   const [bookingDetails, setBookingDetails] = useState({
     bookingNo: "",
     poNumber: "",
     shipperName: "",
     vehicalQty: "",
-    // POD: "",
+    pod: "",
     vessel: "",
     stuffingDate: "",
     cutoffDate: "",
     stuffingPlace: "",
     commodity: "",
-    // quantity: "",
     catagory: "",
     placementDate: "",
     factory: "",
     remark: "",
-    // containerType: "",
-    // cargoWt: "",
+    cargoWt: "",
     cleranceLocation: "",
-    // cleranceContact:"",
   });
 
-
-
+  // Documents (stored locally for preview; uploaded after form creation)
   const [isDocSectionOpen, setIsDocSectionOpen] = useState(false);
   const [doDoc, setDoDoc] = useState<DocItem | null>(null);
   const [supportingDocs, setSupportingDocs] = useState<DocItem[]>([]);
 
-  // Document handling functions are now correctly placed here
-  const handleDoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!isImageFile(file)) {
-      toast.error("Please select an image file (JPEG/PNG/WebP)");
-      e.target.value = "";
-      return;
-    }
-    if (file.size > 10 * 1024 * 1024) {
-      toast.error("Image must be 10MB or smaller");
-      e.target.value = "";
-      return;
-    }
-    if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
-    const url = URL.createObjectURL(file);
-    setDoDoc({ id: genId(), file, url, kind: "do" });
-    e.target.value = "";
-  };
-
-  const handleSupportingUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
-    const validImages = files.filter((file) => {
-      if (!isImageFile(file)) {
-        toast.error(`Unsupported file type for ${file.name}. Please select an image.`);
-        return false;
-      }
-      if (file.size > 10 * 1024 * 1024) {
-        toast.error(`Image ${file.name} exceeds 10MB limit.`);
-        return false;
-      }
-      return true;
-    });
-    const items = validImages.map((file) => ({
-      id: genId(),
-      file,
-      url: URL.createObjectURL(file),
-      kind: "other" as const,
-    }));
-    setSupportingDocs((prev) => [...prev, ...items]);
-    e.target.value = "";
-  };
-
-  // Helper: generate SHA-256 hash for duplicate detection
-  const generateFileHash = async (file: File): Promise<string> => {
-    const buffer = await file.arrayBuffer();
-    const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
-  };
-
-  // Helper: upload a single image to Convex and attach to form
-  const uploadSingleImage = async (file: File, formId: string) => {
-    // Redundant guards; selection already validated
-    if (!isImageFile(file)) throw new Error("Only image files are allowed");
-    if (file.size > 10 * 1024 * 1024) throw new Error("Image exceeds 10MB");
-
-    const uploadUrl = await generateUploadUrl();
-    const res = await fetch(uploadUrl, {
-      method: "POST",
-      headers: { "Content-Type": file.type },
-      body: file,
-    });
-    if (!res.ok) throw new Error("Failed to upload to storage");
-    const { storageId } = await res.json();
-
-    const fileHash = await generateFileHash(file);
-    await uploadPhoto({
-      formId: formId as any,
-      storageId,
-      category: "documents" as any,
-      fileHash,
-      originalFilename: file.name,
-      fileSize: file.size,
-      mimeType: file.type,
-    });
-  };
-
-  // Helper: upload currently selected DO and supporting images after form creation
-  const uploadSelectedDocs = async (formId: string) => {
-    // DO (optional here; UI indicates mandatory but we don't block form creation)
-    if (doDoc?.file) {
-      try {
-        await uploadSingleImage(doDoc.file, formId);
-      } catch (err) {
-        toast.error(`Failed to upload DO: ${(err as Error).message}`);
-      }
-    }
-
-    // Supporting docs
-    for (const d of supportingDocs) {
-      try {
-        await uploadSingleImage(d.file, formId);
-      } catch (err) {
-        toast.error(`Failed to upload ${d.file.name}: ${(err as Error).message}`);
-      }
-    }
-  };
-
-  const removeDocItem = (kind: "do" | "other", id?: string) => {
-    if (kind === "do") {
-      if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
-      setDoDoc(null);
-    } else {
-      setSupportingDocs((prev) => {
-        const toRemove = prev.find((d) => d.id === id);
-        if (toRemove?.url) URL.revokeObjectURL(toRemove.url);
-        return prev.filter((d) => d.id !== id);
-      });
-    }
-  };
-
-  // useEffect hook is now correctly placed here
-  useEffect(() => {
-    return () => {
-      if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
-      supportingDocs.forEach((d) => d.url && URL.revokeObjectURL(d.url));
-    };
-    // The effect depends on these state variables to clean up properly.
-  }, [doDoc, supportingDocs]);
-
-  // --- END: ALL STATE AND LOGIC MOVED INSIDE THE COMPONENT ---
+  // Memo: map vendorId → name to avoid repeated finds
+  const vendorMap = useMemo(() => {
+    const map = new Map<string, string>();
+    vendors.forEach((v: any) => map.set(v._id, v.name));
+    return map;
+  }, [vendors]);
 
   // Derived totals
-  const totalVehicles = Number.parseInt(bookingDetails.vehicalQty || "0", 10) || 0;
+  const totalVehicles = useMemo(
+    () => Number.parseInt(bookingDetails.vehicalQty || "0", 10) || 0,
+    [bookingDetails.vehicalQty]
+  );
+
   const allocatedCount = useMemo(
     () => allocations.reduce((sum, a) => sum + (a.count || 0), 0),
     [allocations]
   );
+
+  // Memo: count vehicles per allocation once
+  const vehicleCountByAllocation = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const v of vehicles) {
+      counts[v.allocationId] = (counts[v.allocationId] || 0) + 1;
+    }
+    return counts;
+  }, [vehicles]);
+
+  const vehiclesByAllocation = useCallback(
+    (allocationId: string) => vehicleCountByAllocation[allocationId] || 0,
+    [vehicleCountByAllocation]
+  );
+
   const remainingToAllocate = Math.max(0, totalVehicles - allocatedCount);
   const totalVehiclesAdded = vehicles.length;
-  const vehiclesByAllocation = (allocationId: string) =>
-    vehicles.filter((v) => v.allocationId === allocationId).length;
 
   // Validation
   function validateVehicleDraft(d: typeof emptyVehicleDraft) {
@@ -262,8 +147,6 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
     if (!d.vehicleNumber?.trim()) e.vehicleNumber = "Vehicle number is required";
     if (!d.driverName?.trim()) e.driverName = "Driver name is required";
     if (!d.driverMobile?.trim()) e.driverMobile = "Driver mobile is required";
-    if (!d.estimatedArrival) e.estimatedArrival = "Estimated arrival is required";
-    if (!d.estimatedDeparture) e.estimatedDeparture = "Estimated departure is required";
     return e;
   }
 
@@ -287,13 +170,8 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
       {
         id: genId(),
         vendorUserId: "",
-        contactPerson: "",
-        contactMobile: "",
-        // containerType: "",
-        // vehicleSize: "",
-        // containerSize: "",
-        // weight: "",
-        // cargoVolume: "",
+        // contactPerson: "",
+        // contactMobile: "",
         count: Math.min(remainingToAllocate, 1),
       },
     ]);
@@ -316,7 +194,9 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
 
   const removeAllocation = (id: string) => {
     if (vehiclesByAllocation(id) > 0) {
-      toast.warning("Remove vehicles assigned to this transporter before deleting the allocation.");
+      toast.warning(
+        "Remove vehicles assigned to this transporter before deleting the allocation."
+      );
       return;
     }
     setAllocations((prev) => prev.filter((a) => a.id !== id));
@@ -350,13 +230,6 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
     setVehicleDraft({
       ...emptyVehicleDraft,
       transporterName: allocation.transporterName,
-      ContactPerson: allocation.contactPerson,
-      ContactPersonMobile: allocation.contactMobile,
-      // ContainerType: allocation.containerType,
-      // VehicleSize: allocation.vehicleSize,
-      // ContainerSize: allocation.containerSize,
-      // weight: allocation.weight,
-      // CargoVolume: allocation.cargoVolume,
     });
     setErrors({});
     setAddCount(remainingHere);
@@ -374,8 +247,7 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
     }
 
     const allocation = allocations.find((a) => a.id === activeAllocationId)!;
-    const selectedVendor = (vendors || []).find((v) => v._id === allocation.vendorUserId);
-    const transporterName = selectedVendor?.name || "Unknown";
+    const transporterName = vendorMap.get(allocation.vendorUserId) || "Unknown";
 
     const already = vehiclesByAllocation(activeAllocationId);
     const remainingHere = allocation.count - already;
@@ -386,20 +258,13 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
     const newVehicles: Vehicle[] = Array.from({ length: count }, (_, i) => ({
       allocationId: activeAllocationId,
       transporterName,
-      ContactPerson: allocation.contactPerson,
-      ContactPersonMobile: allocation.contactMobile,
-      // ContainerType: allocation.containerType,
-      // VehicleSize: allocation.vehicleSize,
-      // ContainerSize: allocation.containerSize,
-      // weight: allocation.weight,
-      // CargoVolume: allocation.cargoVolume,
+      containerNumber: vehicleDraft.containerNumber,
+      sealNumber: vehicleDraft.sealNumber,
       vehicleNumber: vehicleDraft.vehicleNumber.includes("#")
         ? withAutoNumber(vehicleDraft.vehicleNumber, i + already)
         : vehicleDraft.vehicleNumber,
       driverName: vehicleDraft.driverName,
       driverMobile: vehicleDraft.driverMobile,
-      estimatedArrival: vehicleDraft.estimatedArrival,
-      estimatedDeparture: vehicleDraft.estimatedDeparture,
     }));
 
     setVehicles((prev) => [...prev, ...newVehicles]);
@@ -414,85 +279,170 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
     setVehicles((prev) => prev.filter((_, i) => i !== index));
   };
 
+  // Document handling
+  const handleDoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const error = validateImage(file);
+    if (error) {
+      toast.error(error);
+      e.target.value = "";
+      return;
+    }
+    if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
+    const url = URL.createObjectURL(file);
+    setDoDoc({ id: genId(), file, url, kind: "do" });
+    e.target.value = "";
+  };
+
+  const handleSupportingUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const items: DocItem[] = [];
+    for (const file of files) {
+      const error = validateImage(file);
+      if (error) {
+        toast.error(`${file.name}: ${error}`);
+        continue;
+      }
+      items.push({ id: genId(), file, url: URL.createObjectURL(file), kind: "other" });
+    }
+    if (items.length > 0) setSupportingDocs((prev) => [...prev, ...items]);
+    e.target.value = "";
+  };
+
+  const removeDocItem = (kind: "do" | "other", id?: string) => {
+    if (kind === "do") {
+      if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
+      setDoDoc(null);
+    } else {
+      setSupportingDocs((prev) => {
+        const toRemove = prev.find((d) => d.id === id);
+        if (toRemove?.url) URL.revokeObjectURL(toRemove.url);
+        return prev.filter((d) => d.id !== id);
+      });
+    }
+  };
+
+  // Upload helpers
+  const generateFileHash = async (file: File): Promise<string> => {
+    const buffer = await file.arrayBuffer();
+    const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+  };
+
+  const uploadSingleImage = async (file: File, formId: string) => {
+    const uploadUrl = await generateUploadUrl();
+    const res = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": file.type },
+      body: file,
+    });
+    if (!res.ok) throw new Error("Failed to upload to storage");
+    const { storageId } = await res.json();
+
+    const fileHash = await generateFileHash(file);
+    await uploadPhoto({
+      formId: formId as any,
+      storageId,
+      category: "documents" as any,
+      fileHash,
+      originalFilename: file.name,
+      fileSize: file.size,
+      mimeType: file.type,
+    });
+  };
+
+  const uploadSelectedDocs = async (formId: string) => {
+    const tasks: Array<Promise<void>> = [];
+    if (doDoc?.file) tasks.push(uploadSingleImage(doDoc.file, formId));
+    for (const d of supportingDocs) tasks.push(uploadSingleImage(d.file, formId));
+
+    if (tasks.length === 0) return { success: 0, failed: 0 };
+
+    const results = await Promise.allSettled(tasks);
+    const failed = results.filter((r) => r.status === "rejected").length;
+    const success = results.length - failed;
+
+    if (success > 0) toast.success(`${success} document(s) uploaded`);
+    if (failed > 0) toast.error(`${failed} document(s) failed to upload`);
+
+    // Cleanup object URLs after upload attempt
+    if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
+    supportingDocs.forEach((d) => d.url && URL.revokeObjectURL(d.url));
+    setDoDoc(null);
+    setSupportingDocs([]);
+
+    return { success, failed };
+  };
+
   // Submission checks
   const allocationsMatchTotal = totalVehicles > 0 && allocatedCount === totalVehicles;
   const perAllocationSatisfied = allocations.every(
     (a) => vehiclesByAllocation(a.id) === a.count
   );
-  const allVehicleCountsOk =
-    totalVehicles > 0 &&
-    allocationsMatchTotal &&
-    perAllocationSatisfied &&
-    totalVehiclesAdded === totalVehicles;
+  const isReadyToSubmit = useMemo(() => {
+    return (
+      totalVehicles > 0 &&
+      allocationsMatchTotal &&
+      perAllocationSatisfied &&
+      totalVehiclesAdded === totalVehicles
+    );
+  }, [totalVehicles, allocationsMatchTotal, perAllocationSatisfied, totalVehiclesAdded]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (totalVehicles <= 0) {
-      toast.error("Please set Total Vehicles.");
-      return;
-    }
-    if (!allocationsMatchTotal) {
-      toast.error(`Allocated (${allocatedCount}) must equal Total Vehicles (${totalVehicles}).`);
-      return;
-    }
-    if (!perAllocationSatisfied) {
-      toast.error("Each transporter must have the exact number of vehicles added as allocated.");
-      return;
-    }
+    // Submission no longer depends on allocations; transporter will allocate later
 
     setIsSubmitting(true);
     try {
       const result = await createForm({
         bookingDetails: {
           ...bookingDetails,
-          stuffingDate: bookingDetails.stuffingDate
-            ? new Date(bookingDetails.stuffingDate).getTime()
-            : undefined,
-          cutoffDate: bookingDetails.cutoffDate
-            ? new Date(bookingDetails.cutoffDate).getTime()
-            : undefined,
-          placementDate: bookingDetails.placementDate
-            ? new Date(bookingDetails.placementDate).getTime()
-            : undefined,
+          stuffingDate: dateStrToMs(bookingDetails.stuffingDate),
+          cutoffDate: dateStrToMs(bookingDetails.cutoffDate),
+          placementDate: dateStrToMs(bookingDetails.placementDate),
         },
         allocations: allocations.map((a) => ({
           vendorUserId: a.vendorUserId,
-          contactPerson: a.contactPerson,
-          contactMobile: a.contactMobile,
-          // ContainerType: a.containerType,
-          // VehicleSize: a.vehicleSize,
-          // ContainerSize: a.containerSize,
-          // weight: a.weight,
-          // CargoVolume: a.cargoVolume,
           count: a.count,
         })),
         vehicles: vehicles.map((v) => {
           const parentAllocation = allocations.find((alloc) => alloc.id === v.allocationId);
-          return {
-            ...v,
+          const obj: any = {
+            transporterName: v.transporterName,
+            vehicleNumber: v.vehicleNumber,
+            driverName: v.driverName,
+            driverMobile: v.driverMobile,
+            containerNumber: v.containerNumber || undefined,
+            sealNumber: v.sealNumber || undefined,
+            allocationId: v.allocationId,
             vendorUserId: parentAllocation?.vendorUserId,
-            estimatedArrival: new Date(v.estimatedArrival).getTime(),
-            estimatedDeparture: new Date(v.estimatedDeparture).getTime(),
           };
+          // remove any accidental empty-string values
+          for (const k of Object.keys(obj)) {
+            if (obj[k] === "") obj[k] = undefined;
+          }
+          return obj;
         }),
       } as any);
 
-      // Create vendor assignments (transportVehicles) for this form so vendors can fill Transport Details
+      // Vendor assignments for this form
       try {
         const vehiclesPayload = vehicles.map((v) => {
           const parentAllocation = allocations.find((a) => a.id === v.allocationId);
+          const vendor = vendors.find((ven: any) => ven._id === parentAllocation?.vendorUserId);
           return {
             allocationId: v.allocationId,
             assignedTransporterId: parentAllocation?.vendorUserId as any,
-            transporterName: v.transporterName,
-            contactPerson: v.ContactPerson,
-            contactMobile: v.ContactPersonMobile,
+            transporterName: vendor?.name || v.transporterName || "",
+            containerNumber: v.containerNumber || undefined,
+            sealNumber: v.sealNumber || undefined,
             vehicleNumber: v.vehicleNumber || undefined,
             driverName: v.driverName || undefined,
             driverMobile: v.driverMobile || undefined,
-            estimatedDeparture: v.estimatedDeparture ? new Date(v.estimatedDeparture).getTime() : undefined,
-            estimatedArrival: v.estimatedArrival ? new Date(v.estimatedArrival).getTime() : undefined,
           };
         });
         if (vehiclesPayload.length > 0) {
@@ -505,16 +455,10 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
         toast.error("Failed to create vendor assignments: " + (err as Error).message);
       }
 
-      // Upload queued document images to this newly created form
+      // Upload queued document images for this form
       await uploadSelectedDocs(result.formId);
 
       toast.success(`Form ${result.refId} created successfully!`);
-      // Clear document selections after successful upload
-      if (doDoc?.url) URL.revokeObjectURL(doDoc.url);
-      supportingDocs.forEach((d) => d.url && URL.revokeObjectURL(d.url));
-      setDoDoc(null);
-      setSupportingDocs([]);
-
       onFormCreated(result.formId);
     } catch (error) {
       toast.error("Failed to create form: " + (error as Error).message);
@@ -530,9 +474,7 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
         <div className="bg-white rounded-xl shadow-lg overflow-hidden border border-gray-200">
           <div className="bg-gradient-to-r from-green-600 to-green-700 px-4 sm:px-6 py-3 sm:py-4">
             <div className="flex items-center justify-between">
-              <h2 className="text-lg sm:text-xl font-bold text-white">
-                Booking & Shipment Details
-              </h2>
+              <h2 className="text-lg sm:text-xl font-bold text-white">Booking & Shipment Details</h2>
               <span className="text-xs sm:text-sm text-white/90">
                 Added: {totalVehiclesAdded} / {totalVehicles || 0}
               </span>
@@ -543,7 +485,7 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Booking Number /Reference
+                  Booking Number
                 </label>
                 <input
                   type="text"
@@ -558,23 +500,21 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  PO Number
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Line</label>
                 <input
                   type="text"
-                  value={bookingDetails.poNumber}
+                  value={bookingDetails.poNumber} //(poNumber is refer to 'Line'  )
                   onChange={(e) =>
                     setBookingDetails((prev) => ({ ...prev, poNumber: e.target.value }))
                   }
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Enter PO No"
+                  placeholder="Enter Line Name"
                 />
               </div>
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Total Vehicles / Containers
+                  Total Vehicles / Containers QTY.
                 </label>
                 <input
                   type="number"
@@ -599,7 +539,7 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                     }
                   }}
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Total Vehicles / Containers"
+                  placeholder="Add Total Vehicles / Containers QTY."
                 />
                 <p className="text-xs text-gray-500 mt-1">
                   Allocated: {allocatedCount} / {totalVehicles || 0}
@@ -607,9 +547,7 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Shipper Name
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Shipper Name</label>
                 <input
                   type="text"
                   value={bookingDetails.shipperName}
@@ -622,9 +560,7 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Customer
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Vessel Name</label>
                 <input
                   type="text"
                   value={bookingDetails.vessel}
@@ -632,14 +568,38 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                     setBookingDetails((prev) => ({ ...prev, vessel: e.target.value }))
                   }
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Enter Customer"
+                  placeholder="Enter Vessel Name"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Commodity
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">POD</label>
+                <input
+                  type="text"
+                  value={bookingDetails.pod}
+                  onChange={(e) =>
+                    setBookingDetails((prev) => ({ ...prev, pod: e.target.value }))
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter POD"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Cargo Weight</label>
+                <input
+                  type="text"
+                  value={bookingDetails.cargoWt}
+                  onChange={(e) =>
+                    setBookingDetails((prev) => ({ ...prev, cargoWt: e.target.value }))
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter Cargo Weight"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Commodity</label>
                 <input
                   type="text"
                   value={bookingDetails.commodity}
@@ -652,84 +612,7 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Pickup Place
-                </label>
-                <input
-                  type="text"
-                  value={bookingDetails.stuffingPlace}
-                  onChange={(e) =>
-                    setBookingDetails((prev) => ({ ...prev, stuffingPlace: e.target.value }))
-                  }
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Enter Pickup place"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Pickup Date
-                </label>
-                <input
-                  type="date"
-                  value={bookingDetails.stuffingDate}
-                  onChange={(e) =>
-                    setBookingDetails((prev) => ({ ...prev, stuffingDate: e.target.value }))
-                  }
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Enter Pickup Date"
-                />
-              </div>
-
-              {/* <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Container Type
-                </label>
-                <input
-                  type="text"
-                  value={bookingDetails.containerType}
-                  onChange={(e) =>
-                    setBookingDetails((prev) => ({ ...prev, containerType: e.target.value }))
-                  }
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Enter Container Type"
-                />
-              </div> */}
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Factory
-                </label>
-                <input
-                  type="text"
-                  value={bookingDetails.factory}
-                  onChange={(e) =>
-                    setBookingDetails((prev) => ({ ...prev, factory: e.target.value }))
-                  }
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Enter Factory place"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Placement Date
-                </label>
-                <input
-                  type="date"
-                  value={bookingDetails.placementDate}
-                  onChange={(e) =>
-                    setBookingDetails((prev) => ({ ...prev, placementDate: e.target.value }))
-                  }
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Enter Placement Date"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Category
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Cargo Type</label>
                 <input
                   type="text"
                   value={bookingDetails.catagory}
@@ -737,9 +620,11 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                     setBookingDetails((prev) => ({ ...prev, catagory: e.target.value }))
                   }
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Category"
+                  placeholder="Enter Cargo Type"
                 />
               </div>
+
+
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -759,10 +644,9 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                 />
               </div>
 
+
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Cutoff Date
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Cutoff Date</label>
                 <input
                   type="date"
                   value={bookingDetails.cutoffDate}
@@ -772,10 +656,67 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Enter Cutoff Date"
                 />
+              </div> 
+
+              
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Empty Pickup Depot</label>
+                <input
+                  type="text"
+                  value={bookingDetails.stuffingPlace}
+                  onChange={(e) =>
+                    setBookingDetails((prev) => ({ ...prev, stuffingPlace: e.target.value }))
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter Pickup place"
+                />
               </div>
 
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Empty Pickup Date</label>
+                <input
+                  type="date"
+                  value={bookingDetails.stuffingDate}
+                  onChange={(e) =>
+                    setBookingDetails((prev) => ({ ...prev, stuffingDate: e.target.value }))
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter Pickup Date"
+                />
+              </div>
 
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Factory Stuffing Place</label>
+                <input
+                  type="text"
+                  value={bookingDetails.factory}
+                  onChange={(e) =>
+                    setBookingDetails((prev) => ({ ...prev, factory: e.target.value }))
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter Factory place"
+                />
+              </div>
 
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Factory Placement Date</label>
+                <input
+                  type="date"
+                  value={bookingDetails.placementDate}
+                  onChange={(e) =>
+                    setBookingDetails((prev) => ({ ...prev, placementDate: e.target.value }))
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter Placement Date"
+                />
+              </div>
+
+              
+
+             
+
+              {/* Documents */}
               <div className="md:col-span-2 lg:col-span-3">
                 <button
                   type="button"
@@ -790,10 +731,10 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                 <div className="md:col-span-2 lg:col-span-3 border rounded-lg p-4 bg-gray-50 space-y-4">
                   <div className="flex items-center justify-between">
                     <h4 className="text-sm font-semibold text-gray-800">Upload Documents</h4>
-                    <span className="text-xs text-gray-500">
-                      DO is mandatory; others are optional.
-                    </span>
+                    <span className="text-xs text-gray-500">DO is mandatory; others are optional.</span>
                   </div>
+
+                  {/* DO */}
                   <div className="space-y-2">
                     <label className="block text-sm font-medium text-gray-700">
                       Delivery Order (DO) <span className="text-red-500">*</span>
@@ -808,9 +749,12 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                     ) : (
                       <div className="border rounded-md p-3 bg-white flex items-start justify-between gap-3">
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-gray-800 truncate">{doDoc.file.name}</p>
+                          <p className="text-sm font-medium text-gray-800 truncate">
+                            {doDoc.file.name}
+                          </p>
                           <p className="text-xs text-gray-500">
-                            {(doDoc.file.size / 1024).toFixed(1)} KB • {doDoc.file.type || "Unknown type"}
+                            {(doDoc.file.size / 1024).toFixed(1)} KB •{" "}
+                            {doDoc.file.type || "Unknown type"}
                           </p>
                           {isImageFile(doDoc.file) && (
                             <img
@@ -840,6 +784,8 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                       </div>
                     )}
                   </div>
+
+                  {/* Supporting */}
                   <div className="space-y-2">
                     <label className="block text-sm font-medium text-gray-700">
                       Other Supporting Documents (Optional)
@@ -859,7 +805,9 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                             className="border rounded-md p-3 bg-white flex items-start justify-between gap-3"
                           >
                             <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium text-gray-800 truncate">{d.file.name}</p>
+                              <p className="text-sm font-medium text-gray-800 truncate">
+                                {d.file.name}
+                              </p>
                               <p className="text-xs text-gray-500">
                                 {(d.file.size / 1024).toFixed(1)} KB • {d.file.type || "Unknown type"}
                               </p>
@@ -896,12 +844,8 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                 </div>
               )}
 
-
-
               <div className="md:col-span-2 lg:col-span-3">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Remarks
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Remarks</label>
                 <input
                   type="text"
                   value={bookingDetails.remark}
@@ -909,435 +853,23 @@ export function FormCreator({ onFormCreated }: FormCreatorProps) {
                     setBookingDetails((prev) => ({ ...prev, remark: e.target.value }))
                   }
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Remark"
+                  placeholder="Add Remark"
                 />
               </div>
             </div>
 
-            {/* Transporter Allocation Section */}
-            <div className="mt-8">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-base font-semibold text-gray-900">
-                  Transporter Allocations
-                </h3>
-                <button
-                  type="button"
-                  onClick={addAllocationRow}
-                  className="px-3 py-2 rounded-md bg-blue-600 text-white text-sm hover:bg-blue-700"
-                >
-                  Add Transporter
-                </button>
-              </div>
-
-              <div className="space-y-3">
-                {allocations.length === 0 ? (
-                  <p className="text-sm text-gray-500">
-                    No transporters allocated yet.
-                  </p>
-                ) : (
-                  allocations.map((a) => {
-                    const used = vehiclesByAllocation(a.id);
-                    const remainingHere = Math.max(0, a.count - used);
-                    const selectedVendor = (vendors || []).find(
-                      (v) => v._id === a.vendorUserId
-                    );
-                    const transporterName = selectedVendor?.name || "";
-
-                    return (
-                      <div key={a.id} className="border rounded-md p-3">
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-3">
-                          {<div className="lg:col-span-2">
-                            <label
-                              htmlFor={`transporter-${a.id}`}
-                              className="block text-xs font-medium text-gray-700 mb-1"
-                            >
-                              Transporter Name
-                            </label>
-                            <select
-                              id={`transporter-${a.id}`}
-                              value={a.vendorUserId}
-                              onChange={(e) =>
-                                updateAllocation(a.id, { vendorUserId: e.target.value })
-                              }
-                              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            >
-                              <option value="" disabled>
-                                -- Select a Vendor --
-                              </option>
-                              {(vendors || []).map((vendor) => (
-                                <option key={vendor._id} value={vendor._id}>
-                                  {vendor.name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>}
-
-                          <div>
-                            <label className="block text-xs font-medium text-gray-700 mb-1">
-                              Contact Person
-                            </label>
-                            <input
-                              type="text"
-                              value={a.contactPerson}
-                              onChange={(e) =>
-                                updateAllocation(a.id, { contactPerson: e.target.value })
-                              }
-                              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              placeholder="Contact person"
-                            />
-                          </div>
-
-                          <div>
-                            <label className="block text-xs font-medium text-gray-700 mb-1">
-                              Contact Mobile
-                            </label>
-                            <input
-                              type="text"
-                              value={a.contactMobile}
-                              onChange={(e) =>
-                                updateAllocation(a.id, { contactMobile: e.target.value })
-                              }
-                              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              placeholder="Phone"
-                            />
-                          </div>
-
-                          <div>
-                            <label className="block text-xs font-medium text-gray-700 mb-1">
-                              Vehicles Allocated
-                            </label>
-                            <input
-                              type="number"
-                              min={0}
-                              value={a.count}
-                              onChange={(e) => updateAllocationCount(a.id, e.target.value)}
-                              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            />
-                            <p className="text-[11px] text-gray-500 mt-1">
-                              Added: {used} / {a.count}{" "}
-                              {remainingHere > 0 ? `(Remaining: ${remainingHere})` : ""}
-                            </p>
-                          </div>
-
-                          <div className="flex items-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const ok = window.confirm('Are you sure? Once allocated, this action cannot be changed.');
-                                if (!ok) return;
-                                handleOpenAddVehiclesForAllocation({
-                                  ...a,
-                                  transporterName,
-                                });
-                              }}
-                              disabled={remainingHere <= 0 || !a.vendorUserId}
-                              className={`px-3 py-2 rounded-md text-sm text-white ${remainingHere > 0 && a.vendorUserId
-                                  ? "bg-blue-600 hover:bg-blue-700"
-                                  : "bg-gray-300 cursor-not-allowed"
-                                }`}
-                            >
-                              Send To Transporter
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => removeAllocation(a.id)}
-                              disabled={used > 0}
-                              className={`px-3 py-2 rounded-md text-sm ${used > 0
-                                  ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                                  : "bg-red-50 text-red-600 hover:bg-red-100"
-                                }`}
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-
-              <p className="text-xs text-gray-500 mt-2">
-                Allocated: {allocatedCount} / {totalVehicles || 0} • Remaining to
-                allocate: {remainingToAllocate}
-              </p>
-            </div>
-
-            {/* Vehicles summary list */}
-            <div className="mt-8">
-              <h4 className="text-sm font-semibold text-gray-800 mb-2">
-                Vehicles added ({totalVehiclesAdded}/{totalVehicles || 0})
-              </h4>
-              {vehicles.length === 0 ? (
-                <p className="text-sm text-gray-500">No vehicles added yet.</p>
-              ) : (
-                <div className="space-y-2">
-                  {vehicles.map((v, i) => (
-                    <div
-                      key={`${v.vehicleNumber}-${i}`}
-                      className="flex flex-col md:flex-row md:items-center justify-between border rounded-md px-3 py-2"
-                    >
-                      <div className="text-sm text-gray-700">
-                        <span className="font-medium">
-                          {v.vehicleNumber || "Vehicle"}
-                        </span>
-                        <span className="mx-2 text-gray-400">•</span>
-                        Transporter: {v.transporterName}
-                        <span className="mx-2 text-gray-400">•</span>
-                        Driver: {v.driverName} ({v.driverMobile})
-                        <span className="mx-2 text-gray-400">•</span>
-                        ETA: {v.estimatedArrival || "-"} | ETD:{" "}
-                        {v.estimatedDeparture || "-"}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveVehicle(i)}
-                        className="text-red-600 hover:text-red-700 text-sm mt-2 md:mt-0"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            {/* Transporter Allocations removed: transporter will allocate later in their dashboard */}
           </div>
         </div>
 
-        {/* Transport Details bulk-add panel */}
-        {isAddingVehicle && activeAllocationId && (
-          <div className="bg-white rounded-xl shadow-lg overflow-hidden border border-gray-200">
-            <div className="bg-gradient-to-r from-blue-600 to-blue-700 px-4 sm:px-6 py-3 sm:py-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg sm:text-xl font-bold text-white">
-                  Transport Details
-                </h2>
-                <span className="text-xs sm:text-sm text-white/90">
-                  {(() => {
-                    const alloc = allocations.find((a) => a.id === activeAllocationId)!;
-                    const used = vehiclesByAllocation(activeAllocationId);
-                    return `For ${(vendors || []).find((v) => v._id === alloc.vendorUserId)?.name ??
-                      "Transporter"
-                      } • Remaining: ${Math.max(0, (alloc?.count || 0) - used)}`;
-                  })()}
-                </span>
-              </div>
-            </div>
-
-            <div className="p-4 sm:p-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-                {/* Transporter info (derived, read-only) */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Transporter
-                  </label>
-                  <input
-                    type="text"
-                    value={
-                      (() => {
-                        const alloc = allocations.find((a) => a.id === activeAllocationId)!;
-                        return (
-                          (vendors || []).find((v) => v._id === alloc.vendorUserId)?.name ||
-                          ""
-                        );
-                      })()
-                    }
-                    disabled
-                    className="w-full px-4 py-3 border rounded-lg bg-gray-50 text-gray-600"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Contact Person
-                  </label>
-                  <input
-                    type="text"
-                    value={vehicleDraft.ContactPerson}
-                    disabled
-                    className="w-full px-4 py-3 border rounded-lg bg-gray-50 text-gray-600"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Contact Mobile
-                  </label>
-                  <input
-                    type="text"
-                    value={vehicleDraft.ContactPersonMobile}
-                    disabled
-                    className="w-full px-4 py-3 border rounded-lg bg-gray-50 text-gray-600"
-                  />
-                </div>
-
-                {/* Vehicle details */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Vehicle Number <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={vehicleDraft.vehicleNumber}
-                    onChange={(e) =>
-                      setVehicleDraft((prev) => ({ ...prev, vehicleNumber: e.target.value }))
-                    }
-                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${errors.vehicleNumber ? "border-red-500" : "border-gray-300"
-                      }`}
-                    placeholder="e.g., MH12AB## (## auto-numbers to 01, 02, ...)"
-                  />
-                  {errors.vehicleNumber && (
-                    <p className="text-red-600 text-sm mt-1">{errors.vehicleNumber}</p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Estimated Arrival <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="date"
-                    value={vehicleDraft.estimatedArrival}
-                    onChange={(e) =>
-                      setVehicleDraft((prev) => ({
-                        ...prev,
-                        estimatedArrival: e.target.value,
-                      }))
-                    }
-                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${errors.estimatedArrival ? "border-red-500" : "border-gray-300"
-                      }`}
-                  />
-                  {errors.estimatedArrival && (
-                    <p className="text-red-600 text-sm mt-1">{errors.estimatedArrival}</p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Estimated Departure <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="date"
-                    value={vehicleDraft.estimatedDeparture}
-                    onChange={(e) =>
-                      setVehicleDraft((prev) => ({
-                        ...prev,
-                        estimatedDeparture: e.target.value,
-                      }))
-                    }
-                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${errors.estimatedDeparture ? "border-red-500" : "border-gray-300"
-                      }`}
-                  />
-                  {errors.estimatedDeparture && (
-                    <p className="text-red-600 text-sm mt-1">{errors.estimatedDeparture}</p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Driver Name <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={vehicleDraft.driverName}
-                    onChange={(e) =>
-                      setVehicleDraft((prev) => ({ ...prev, driverName: e.target.value }))
-                    }
-                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${errors.driverName ? "border-red-500" : "border-gray-300"
-                      }`}
-                    placeholder="Enter driver name"
-                  />
-                  {errors.driverName && (
-                    <p className="text-red-600 text-sm mt-1">{errors.driverName}</p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Driver Mobile <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={vehicleDraft.driverMobile}
-                    onChange={(e) =>
-                      setVehicleDraft((prev) => ({ ...prev, driverMobile: e.target.value }))
-                    }
-                    className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors ${errors.driverMobile ? "border-red-500" : "border-gray-300"
-                      }`}
-                    placeholder="Enter driver mobile number"
-                  />
-                  {errors.driverMobile && (
-                    <p className="text-red-600 text-sm mt-1">{errors.driverMobile}</p>
-                  )}
-                </div>
-              </div>
-
-              {/* Bulk add controls */}
-              <div className="mt-6 flex items-center justify-between gap-3">
-                {/* <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-gray-700">
-                    Number of vehicles to add
-                  </label>
-                  <input
-                    type="number"
-                    min={1} 
-                    value={addCount}
-                    onChange={(e) => {
-                      const alloc = allocations.find((a) => a.id === activeAllocationId)!;
-                      const used = vehiclesByAllocation(activeAllocationId);
-                      const remainingHere = Math.max(0, (alloc?.count || 0) - used);
-                      const val = Math.max(
-                        1,
-                        Math.min(Number(e.target.value || 1), remainingHere || 1)
-                      );
-                      setAddCount(val);
-                    }}
-                    className="w-24 border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div> */}
-
-                <div className="ml-auto flex gap-3">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsAddingVehicle(false);
-                      setActiveAllocationId(null);
-                      setVehicleDraft(emptyVehicleDraft);
-                      setErrors({});
-                      setAddCount(1);
-                    }}
-                    className="px-4 py-2 rounded-md font-medium border border-gray-300 text-gray-700 hover:bg-gray-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleSaveVehicles}
-                    className="px-4 py-2 rounded-md font-medium text-white bg-blue-600 hover:bg-blue-700"
-                  >
-                    Save Vehicle(s)
-                  </button>
-                </div>
-              </div>
-
-              <p className="mt-2 text-xs text-gray-500">
-                Tip: Use # in Vehicle Number (e.g., MH12AB##) to auto-number when adding multiple vehicles.
-              </p>
-            </div>
-          </div>
-        )}
+        {/* Transport Details vehicle-add panel removed */}
 
         {/* Submit Button */}
-        <div className="flex items-center justify-between">
-          {!allVehicleCountsOk && (
-            <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
-              Make sure Allocated = Total, and vehicles added match each transporter’s allocation.
-            </p>
-          )}
+        <div className="flex items-center justify-end">
           <button
             type="submit"
-            disabled={isSubmitting || !allVehicleCountsOk}
-            className="ml-auto px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed font-medium"
+            disabled={isSubmitting}
+            className="px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed font-medium"
           >
             {isSubmitting ? "Creating..." : "Create Transport Form"}
           </button>

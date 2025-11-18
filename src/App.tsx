@@ -1,10 +1,19 @@
-import { Authenticated, Unauthenticated, useQuery } from "convex/react";
-import { api } from "../convex/_generated/api";
-import { SignInForm } from "./SignInForm";
-import { SignOutButton } from "./SignOutButton";
-import { Toaster } from "sonner";
-import { Dashboard } from "./components/Dashboard";
-import { useEffect } from "react";
+import { Suspense, lazy } from 'react';
+import { Authenticated, Unauthenticated, useQuery } from 'convex/react';
+import { api } from '../convex/_generated/api';
+import { SignInForm } from './SignInForm';
+import { SignOutButton } from './SignOutButton';
+import { Toaster } from 'sonner';
+import { LoadingSpinner, PageLoader } from './components/LoadingSpinner';
+import { lazyWithRetry } from './utils/lazyWithRetry';
+
+// Lazy load the Dashboard component
+const LazyDashboard = lazyWithRetry(
+  () => import('./components/Dashboard').then(mod => ({ default: mod.Dashboard })),
+  <div className="flex justify-center p-8">
+    <LoadingSpinner size="lg" />
+  </div>
+);
 
 export default function App() {
   return (
@@ -24,11 +33,7 @@ function AuthenticatedApp() {
   const currentUser = useQuery(api.users.getCurrentUser);
   
   if (currentUser === undefined) {
-    return (
-      <div className="flex justify-center items-center min-h-screen">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-      </div>
-    );
+    return <PageLoader />;
   }
   
   if (!currentUser) {
@@ -65,7 +70,13 @@ function AuthenticatedApp() {
       </header>
       
       <main className="flex-1">
-        <Dashboard user={currentUser} />
+        <Suspense fallback={
+          <div className="flex justify-center p-8">
+            <LoadingSpinner size="lg" />
+          </div>
+        }>
+          <LazyDashboard user={currentUser} />
+        </Suspense>
       </main>
     </>
   );

@@ -9,7 +9,7 @@ interface User {
   _id: string;
   name?: string;
   email?: string;
-  role: "employee" | "admin" | "vendor" | "order_placer" | null;
+  role: "employee" | "admin" | "vendor" | "order_placer" | "transporter" | null;
   permissions: string[];
 }
 
@@ -190,7 +190,7 @@ export function EmployeeDashboard({ user }: EmployeeDashboardProps) {
                       <div>
                         <p className="text-sm font-medium text-gray-900">{form.refId}</p>
                         <p className="text-sm text-gray-500">
-                          {form.transportDetails.vehicleNumber} • {form.bookingDetails.shipperName}
+                          {form.transportDetails?.vehicleNumber ?? "-"} • {form.bookingDetails.shipperName}
                         </p>
                       </div>
                       <div>

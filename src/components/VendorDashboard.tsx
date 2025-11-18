@@ -11,7 +11,7 @@ interface User {
   _id: string;
   name?: string;
   email?: string;
-  role: "employee" | "admin" | "vendor" | "order_placer" | null;
+  role: "employee" | "admin" | "vendor" | "order_placer" | "transporter" | null;
   permissions: string[];
 }
 

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useMutation } from "convex/react";
+import { useQuery, useMutation, useAction } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { toast } from "sonner";
 import { FormViewer } from "./FormViewer";
@@ -8,7 +8,7 @@ interface User {
   _id: string;
   name?: string;
   email?: string;
-  role: "employee" | "admin" | "vendor" | "order_placer" | null;
+  role: "employee" | "admin" | "vendor" | "order_placer" | "transporter" | null;
   permissions: string[];
 }
 
@@ -19,11 +19,13 @@ interface AdminDashboardProps {
 export function AdminDashboard({ user }: AdminDashboardProps) {
   const [activeTab, setActiveTab] = useState<"overview" | "forms" | "users" | "activity">("overview");
   const [selectedFormId, setSelectedFormId] = useState<string | null>(null);
+  const [pwdInputs, setPwdInputs] = useState<Record<string, { pwd: string; confirm: string }>>({});
   
   const forms = useQuery(api.forms.listForms, {}) || [];
   const users = useQuery(api.users.listUsersWithRoles) || [];
   const recentActivity = useQuery(api.audit.getRecentActivity, { limit: 10 }) || [];
   const assignRole = useMutation(api.users.assignRole);
+  const resetVendorPassword = useAction(api.users.adminSetVendorPassword);
 
   const stats = {
     total: forms.length,
@@ -37,7 +39,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     }).length,
   };
 
-  const handleAssignRole = async (userId: string, role: "employee" | "admin" | "vendor" | "order_placer") => {
+  const handleAssignRole = async (userId: string, role: "employee" | "admin" | "vendor" | "order_placer" | "transporter") => {
     try {
       await assignRole({ userId: userId as any, role });
       toast.success("Role assigned successfully");
@@ -162,7 +164,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                     <div>
                       <p className="text-sm font-medium text-gray-900">{form.refId}</p>
                       <p className="text-sm text-gray-500">
-                        {form.bookingDetails.stuffingPlace} → {form.bookingDetails.POD}
+                        {form.bookingDetails.stuffingPlace} → {form.bookingDetails.pod}
                       </p>
                       <p className="text-xs text-gray-400">
                         Created {new Date(form.createdAt).toLocaleDateString()}
@@ -205,12 +207,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                       <div>
                         <p className="text-sm font-medium text-gray-900">{form.refId}</p>
                         <p className="text-sm text-gray-500">
-                          {form.transportDetails.vehicleNumber} • {form.bookingDetails.shipperName}
+                          {form.transportDetails?.vehicleNumber ?? "-"} • {form.bookingDetails.shipperName}
                         </p>
                       </div>
                       <div>
                         <p className="text-sm text-gray-500">
-                          {form.bookingDetails.stuffingPlace} → {form.bookingDetails.POD}
+                          {form.bookingDetails.stuffingPlace} → {form.bookingDetails.pod}
                         </p>
                         <p className="text-xs text-gray-400">
                           Created {new Date(form.createdAt).toLocaleDateString()}
@@ -263,6 +265,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                       user.role === "admin" ? "bg-red-100 text-red-800" :
                       user.role === "employee" ? "bg-blue-100 text-blue-800" :
                       user.role === "vendor" ? "bg-purple-100 text-purple-800" :
+                      user.role === "transporter" ? "bg-indigo-100 text-indigo-800" :
                       user.role === "order_placer" ? "bg-green-100 text-green-800" :
                       "bg-gray-100 text-gray-800"
                     }`}>
@@ -277,10 +280,59 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                       <option value="employee">Employee</option>
                       <option value="admin">Admin</option>
                       <option value="vendor">Vendor</option>
+                      <option value="transporter">Transporter</option>
                       <option value="order_placer">Order Placer</option>
                     </select>
                   </div>
                 </div>
+                {user.role === "vendor" && (
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <input
+                      type="password"
+                      placeholder="New password (min 8 chars)"
+                      className="border border-gray-300 rounded px-2 py-1 text-sm"
+                      value={pwdInputs[user._id]?.pwd || ""}
+                      onChange={(e) => setPwdInputs((prev) => ({
+                        ...prev,
+                        [user._id]: { pwd: e.target.value, confirm: prev[user._id]?.confirm || "" },
+                      }))}
+                    />
+                    <input
+                      type="password"
+                      placeholder="Confirm password"
+                      className="border border-gray-300 rounded px-2 py-1 text-sm"
+                      value={pwdInputs[user._id]?.confirm || ""}
+                      onChange={(e) => setPwdInputs((prev) => ({
+                        ...prev,
+                        [user._id]: { pwd: prev[user._id]?.pwd || "", confirm: e.target.value },
+                      }))}
+                    />
+                    <button
+                      className="px-3 py-2 border rounded hover:bg-gray-50 text-sm"
+                      onClick={async () => {
+                        const pwd = pwdInputs[user._id]?.pwd || "";
+                        const confirm = pwdInputs[user._id]?.confirm || "";
+                        if (!pwd || pwd.length < 8) {
+                          toast.error("Password must be at least 8 characters long");
+                          return;
+                        }
+                        if (pwd !== confirm) {
+                          toast.error("Passwords do not match");
+                          return;
+                        }
+                        try {
+                          await resetVendorPassword({ targetUserId: user._id as any, newPassword: pwd });
+                          toast.success("Vendor password updated and sessions invalidated");
+                          setPwdInputs((prev) => ({ ...prev, [user._id]: { pwd: "", confirm: "" } }));
+                        } catch (err) {
+                          toast.error((err as Error).message);
+                        }
+                      }}
+                    >
+                      Set Password
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>

@@ -7,7 +7,13 @@ const applicationTables = {
   // User roles and permissions
   userRoles: defineTable({
     userId: v.id("users"),
-    role: v.union(v.literal("employee"), v.literal("admin"), v.literal("vendor"), v.literal("order_placer")),
+    role: v.union(
+      v.literal("employee"),
+      v.literal("admin"),
+      v.literal("vendor"),
+      v.literal("order_placer"),
+      v.literal("transporter"),
+    ),
     permissions: v.array(v.string()),
     assignedBy: v.optional(v.id("users")),
     isActive: v.boolean(),
@@ -23,23 +29,20 @@ const applicationTables = {
     status: v.union(v.literal("pending"), v.literal("completed")),
 
 
-    transportDetails: v.object({
-
-      estimatedDeparture: v.number(),
-      estimatedArrival: v.number(),
+    transportDetails: v.optional(v.object({
       transporterName: v.string(),
-      ContactPerson: v.string(),
-      ContactPersonMobile: v.string(),
+      containerNumber: v.optional(v.string()),
+      sealNumber: v.optional(v.string()),
       vehicleNumber: v.string(),
       driverName: v.string(),
       driverMobile: v.string(),
-    }),
+    })),
     // Booking & Shipment Summary
     bookingDetails: v.object({
       bookingNo: v.string(),
       poNumber: v.string(),
       shipperName: v.string(),
-      // POD: v.string(),
+      pod: v.string(),
       vessel: v.string(),
       stuffingDate: v.number(),
       cutoffDate: v.number(),
@@ -51,7 +54,7 @@ const applicationTables = {
       remark: v.string(),
       // containerType: v.string(),
       // quantity: v.string(),
-      // cargoWt: v.string(),
+      cargoWt: v.string(),
       cleranceLocation: v.string(),    //Cutoff Place
       // cleranceContact: v.string(),
       vehicalQty:v.string(),
@@ -64,8 +67,8 @@ v.object({
 id: v.optional(v.string()),
 vendorUserId: v.optional(v.id("users")),
 transporterName: v.optional(v.string()),
-contactPerson: v.optional(v.string()),
-contactMobile: v.optional(v.string()),
+containerNumber:v.optional(v.string()),
+sealNumber:v.optional(v.string()),
 count: v.number(),
 })
 )
@@ -100,9 +103,9 @@ count: v.number(),
   // Container details
   containers: defineTable({
     formId: v.id("transportForms"),
+    // Container Details
     containerNumber: v.string(),
 
-    // Container Details
     sealNumber: v.string(),
     doNumber: v.string(), // Delivery Order
     isoCode: v.string(), // ISO 6346 compliant
@@ -266,43 +269,38 @@ count: v.number(),
 // ...authTables and your existing tables
 // ...existing tables
 transportVehicles: defineTable({
-formId: v.id("transportForms"),
-allocationId: v.string(),
-assignedTransporterId: v.optional(v.id("users")), // vendor user
-transporterName: v.string(),
-contactPerson: v.optional(v.string()),
-contactMobile: v.optional(v.string()),
-// containerType: v.optional(v.string()),
-vehicleSize: v.optional(v.string()),
-// containerSize: v.optional(v.string()),
-// weight: v.optional(v.string()),
-// cargoVolume: v.optional(v.string()),
-vehicleNumber: v.optional(v.string()),
-driverName: v.optional(v.string()),
-driverMobile: v.optional(v.string()),
-estimatedDeparture: v.optional(v.number()), // epoch ms
-estimatedArrival: v.optional(v.number()), // epoch ms
-status: v.union(v.literal("draft"), v.literal("submitted")),
-submittedAt: v.optional(v.number()),
-submittedBy: v.optional(v.id("users")),
-createdAt: v.number(),
-updatedAt: v.number(),
-updatedBy: v.optional(v.id("users")),
+  formId: v.id("transportForms"),
+  allocationId: v.string(),
+  assignedTransporterId: v.optional(v.id("users")), // vendor user
+  transporterName: v.string(),
+  containerNumber: v.optional(v.string()),
+  sealNumber: v.optional(v.string()),
+  vehicleSize: v.optional(v.string()),
+  vehicleNumber: v.optional(v.string()),
+  driverName: v.optional(v.string()),
+  driverMobile: v.optional(v.string()),
+  
+  status: v.union(v.literal("draft"), v.literal("submitted")),
+  submittedAt: v.optional(v.number()),
+  submittedBy: v.optional(v.id("users")),
+  createdAt: v.number(),
+  updatedAt: v.number(),
+  updatedBy: v.optional(v.id("users")),
 })
 .index("by_form", ["formId"])
 .index("by_transporter", ["assignedTransporterId"])
 .index("by_status", ["status"]),
 
 transporterContacts: defineTable({
-name: v.string(),
-email: v.optional(v.string()),
-contactPerson: v.optional(v.string()),
-contactMobile: v.optional(v.string()),
-createdAt: v.number(),
-createdBy: v.id("users"),
+  name: v.string(),
+  email: v.optional(v.string()),
+  containerNumber: v.string(),
+  sealNumber: v.string(),
+  createdAt: v.number(),
+  createdBy: v.id("users"),
 }).index("by_email", ["email"]),
-};
 
+};
 
 export default defineSchema({
   ...authTables,

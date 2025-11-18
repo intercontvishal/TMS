@@ -1,6 +1,7 @@
 import { v } from "convex/values";
-import { query, mutation, internalMutation } from "./_generated/server";
-import { getAuthUserId } from "@convex-dev/auth/server";
+import { query, mutation, internalMutation, action } from "./_generated/server";
+import { getAuthUserId, modifyAccountCredentials, invalidateSessions } from "@convex-dev/auth/server";
+import { internal, api } from "./_generated/api";
 
 
 
@@ -13,7 +14,7 @@ export const getVendors = query({
     const vendorRoles = await ctx.db
       .query("userRoles")
       .withIndex("by_role", (q) => q.eq("role", "vendor"))
-      // .filter((q) => q.eq(q.field("isActive"), true)) // Optional: only fetch active vendors
+      .filter((q) => q.eq(q.field("isActive"), true)) // Only fetch active vendors
       .collect();
 
     // 2. The `userRoles` table only has `userId`. We need the user's name.
@@ -36,6 +37,68 @@ export const getVendors = query({
     
     // 3. Filter out any null results to ensure a clean array.
     return vendors.filter((v): v is { _id: any; name: string } => v !== null);
+  },
+});
+
+// Set current user's display name
+export const setMyName = mutation({
+  args: { name: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Not authenticated");
+    await ctx.db.patch(userId, { name: args.name });
+    return { success: true };
+  },
+});
+
+// Admin-only: set or reset a vendor user's password
+export const adminSetVendorPassword = action({
+  args: {
+    targetUserId: v.id("users"),
+    newPassword: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const adminUserId = await getAuthUserId(ctx);
+    if (!adminUserId) throw new Error("Not authenticated");
+    const me = await ctx.runQuery(api.users.getCurrentUser, {});
+    if (!me || me.role !== "admin") throw new Error("Admin access required");
+
+    // Basic password validation
+    if (!args.newPassword || args.newPassword.length < 8) {
+      throw new Error("Password must be at least 8 characters long");
+    }
+
+    const usersWithRoles = await ctx.runQuery(api.users.listUsersWithRoles, {});
+    const targetUser = usersWithRoles.find((u: any) => String(u._id) === String(args.targetUserId));
+    if (!targetUser) throw new Error("Target user not found");
+    if (targetUser.role !== "vendor") throw new Error("Target user is not an active vendor");
+
+    // For the Password provider, the account id is the email address
+    const email = (targetUser as any).email as string | undefined;
+    if (!email) throw new Error("Target user has no email set");
+
+    // Update credentials via Convex Auth API
+    await modifyAccountCredentials(ctx as any, {
+      provider: "password",
+      account: {
+        id: email,
+        secret: args.newPassword,
+      },
+    });
+
+    // Invalidate existing sessions for security
+    await invalidateSessions(ctx as any, { userId: args.targetUserId });
+
+    // Audit log
+    await ctx.runMutation(internal.audit.logAction, {
+      entityType: "user",
+      entityId: String(args.targetUserId),
+      action: "admin_set_password",
+      userId: adminUserId,
+      changes: { after: { passwordChanged: true } },
+    });
+
+    return { success: true };
   },
 });
 
@@ -96,7 +159,13 @@ export const hasPermission = query({
 export const assignRole = mutation({
   args: {
     userId: v.id("users"),
-    role: v.union(v.literal("employee"), v.literal("admin"), v.literal("vendor"), v.literal("order_placer")),
+    role: v.union(
+      v.literal("employee"),
+      v.literal("admin"),
+      v.literal("vendor"),
+      v.literal("order_placer"),
+      v.literal("transporter"),
+    ),
   },
   handler: async (ctx, args) => {
     const currentUserId = await getAuthUserId(ctx);
@@ -131,13 +200,18 @@ export const assignRole = mutation({
       admin: ["*"], // All permissions
       vendor: ["photos.upload", "forms.view_assigned"],
       order_placer: ["forms.view_readonly"],
-    };
+      transporter: [
+        "bookings.view",
+        "bookings.allocate_vendors",
+        "forms.view_readonly",
+      ],
+    } as const;
     
     // Create new role
     await ctx.db.insert("userRoles", {
       userId: args.userId,
       role: args.role,
-      permissions: permissions[args.role],
+      permissions: (permissions as any)[args.role],
       assignedBy: currentUserId,
       isActive: true,
     });
@@ -185,6 +259,7 @@ export const initializeDefaultUsers = mutation({
         admin: ["*"],
         vendor: ["photos.upload", "forms.view_assigned"],
         order_placer: ["forms.view_readonly"],
+        Transporter: ["photos.upload", "forms.view_assigned"],
       };
       
       await ctx.db.insert("userRoles", {

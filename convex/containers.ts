@@ -386,9 +386,12 @@ export const getContainers = query({
       .filter((q) => q.eq(q.field("isActive"), true))
       .first();
     
-    const canView = userRole?.role === "admin" || 
-                   (userRole?.role === "employee" && form.employeeId === userId) ||
-                   (userRole?.role === "vendor" && userRole.permissions.includes("forms.view_assigned"));
+    const canView =
+      userRole?.role === "admin" ||
+      (userRole?.role === "employee" && form.employeeId === userId) ||
+      userRole?.role === "transporter" ||
+      userRole?.permissions.includes("forms.view_readonly") ||
+      (userRole?.role === "vendor" && userRole.permissions.includes("forms.view_assigned"));
     
     if (!canView) {
       throw new Error("Access denied");
